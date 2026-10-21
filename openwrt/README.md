@@ -8,8 +8,10 @@ not LAN4/WAN. Never enable the router's DHCP server on the Freebox LAN.
 ## Image and recovery
 
 `build_image.py` requests a lean OpenWrt 25.12.6 image from the official
-Attended Sysupgrade service. It includes QMI, LuCI and HTTPS, but excludes Wi-Fi,
-PPP and IPv6 DHCP clients/servers. The build service receives the public SSH
+Attended Sysupgrade service. It includes QMI, LuCI, HTTPS and the optional IPv6
+DHCP client, but excludes Wi-Fi, PPP and the IPv6 DHCP/RA server. The build
+also embeds the recovery service, diagnostics, provisioning and bounded IPv6
+capability probe, with a SHA-256 manifest. The build service receives the public SSH
 key, APN and first-boot script. **Never put passwords, private keys or SIM PINs
 in that script or the build request.** Store all generated artifacts outside
 the checkout in a restricted directory.
@@ -17,6 +19,14 @@ the checkout in a restricted directory.
 Use an RSA key (3072 bits recommended). This small-flash Dropbear build does
 not support Ed25519 authentication. Supplying only an Ed25519 key while
 disabling password login locks out normal SSH access.
+
+The embedded installer uses only shell `printf`, gzip, tar and sha256sum;
+the lean image does not contain a `base64` command. Its compressed payload is
+deterministic, hash-checked before extraction and bounded by the service's
+40 KiB defaults limit. An existing `/etc/failsafe-router/provisioned` marker
+preserves initialized WAN, firewall, password, SSH and HTTPS configuration on
+upgrade instead of re-running fresh-install defaults. Include the marker in
+the configuration backup and verify the preserve branch before flashing.
 
 ```text
 python openwrt/build_image.py --public-key PATH_TO_RSA_PUBLIC_KEY --output PRIVATE_DIRECTORY --apn OPERATOR_APN
@@ -88,11 +98,16 @@ Include both paths, `/etc/sysctl.d/90-failsafe-router.conf` and the enabled
 
 ## Acceptance boundary
 
-The deployed 25.12.6 recovery image has SHA-256
+The initial 25.12.6 recovery image had SHA-256
 `aa2aa71e7fac618dc32809383bd1c3a93e6e5c6ce76aae2ac2a1b09cf83e45f0`.
 Its embedded defaults predate the later DHCP/PDP refinements in this directory;
 those refinements are applied in the live configuration over SSH. Do not assume
 rebuilding this directory reproduces that older image byte for byte.
+
+The subsequent integrated-tools sysupgrade image has SHA-256
+`3685bdb93d6d451fe1d167d248135bc0aa5676e3f604d72735966fee1eaadda9`.
+The [dual-stack development record](../docs/DUAL-STACK-DESIGN.md) distinguishes
+its added capabilities from household IPv6 failover, which is not implemented.
 
 Observed checks on 2026-10-21 UTC (2026-10-22 local time):
 

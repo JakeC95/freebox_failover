@@ -54,8 +54,10 @@ uci set network.wan.pdptype='ip'
 uci set network.wan.autoconnect='1'
 uci commit network
 ifup wan
+mkdir -p /etc/failsafe-router
+printf '%s\n' 1 > /etc/failsafe-router/provisioned
 if [ -x /usr/libexec/failsafe-qmi-watchdog ] && [ -x /etc/init.d/failsafe-qmi ]; then
-    for backup_path in /usr/libexec/failsafe-qmi-watchdog /etc/init.d/failsafe-qmi /etc/sysctl.d/90-failsafe-router.conf /etc/rc.d/S95failsafe-qmi /etc/rc.d/K15failsafe-qmi; do
+    for backup_path in /usr/libexec/failsafe-qmi-watchdog /etc/init.d/failsafe-qmi /etc/sysctl.d/90-failsafe-router.conf /etc/rc.d/S95failsafe-qmi /etc/rc.d/K15failsafe-qmi /etc/failsafe-router/provisioned; do
         grep -qxF "$backup_path" /etc/sysupgrade.conf || printf '%s\n' "$backup_path" >> /etc/sysupgrade.conf
     done
     /etc/init.d/failsafe-qmi enable
