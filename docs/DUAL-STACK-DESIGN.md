@@ -158,3 +158,9 @@ carrier-proxy UDP/TCP DNS, verified TLS 1.3 and a 1 MiB transfer in 1.23 seconds
 roaming path as previously observed; the configured carrier proxy succeeded.
 Primary HTTPS also passed, temporary routing was cleaned up, and the monitor was
 restarted. The service journal had no warning/error entries during this check.
+
+The next [Internet-connected pilot LAN](PILOT-LAN.md) has now been implemented
+and exercised with a separate virtual gateway/client, real fibre IPv4/IPv6,
+real cellular IPv4, stable local dual-stack DNS and restoration. It uses temporary
+ULA/NAT66 for the experiment rather than changing a Freebox delegation. Its
+explicit phase switching is not production automatic outage handling.
