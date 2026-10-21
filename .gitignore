@@ -7,3 +7,9 @@ dist/
 *.qcow2
 *.pem
 *.key
+openwrt/*.bin
+openwrt/*.ipk
+openwrt/*.apk
+openwrt/*.crt
+openwrt/*.tar.gz
+openwrt/*credential*.clixml

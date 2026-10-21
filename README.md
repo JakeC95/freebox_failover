@@ -33,7 +33,9 @@ an armed and confirmed outage with a working backup.
 
 Read [Ethernet setup](ETHERNET.md) for router wiring, addressing and the IPv6
 requirement. The [TL-MR6400 V5 audit](docs/TL-MR6400-V5.md) records stock-router
-settings, tested decisions and remaining firmware limitations. Read
+settings, tested decisions and remaining firmware limitations. The
+[OpenWrt migration guide](openwrt/README.md) covers the custom image, secure
+provisioning and QMI recovery safeguards. Read
 [operations](OPERATIONS.md) for health checks, upgrades and
 rollback. The repository's configuration matches this VM and defaults to
 `enabled = false`; adapt it before using another installation.
