@@ -89,3 +89,72 @@ firmware update. Automatic takeover remains monitor-only.
 References: [QMI protocol handler](https://github.com/openwrt/openwrt/blob/openwrt-25.12/package/network/utils/uqmi/files/lib/netifd/proto/qmi.sh),
 [TP-Link IPv6 SIM prerequisite](https://service-provider.tp-link.com/faq/198/),
 [TL-MR6400 V5 specifications](https://www.tp-link.com/tr/home-networking/3g-4g-router/tl-mr6400/v5/).
+
+## Reproducible isolated routing experiment
+
+`tools/dual_stack_lab.py --run` is an explicitly invoked Linux/root experiment,
+not an installed service or a production router-advertisement implementation.
+It requires Python 3, Scapy, iproute2, nftables and ping. Run it on the Debian VM:
+
+```sh
+sudo python3 tools/dual_stack_lab.py --run
+```
+
+The lab creates two uniquely named network namespaces. Its veth pair is created
+inside a namespace, never attached to the household interface or any host bridge.
+It uses documentation-only addresses, has no Internet uplink, and deletes its
+servers/namespaces in a finally block. Host IPv4/IPv6 route identities are checked
+before and after; changing RA expiration counters are excluded from comparison.
+
+Eight checks passed on the Debian ARM64 VM:
+
+1. Actual Linux RA processing installs a native default route and SLAAC address.
+2. A real UDP DNS query/answer succeeds before transition.
+3. With two advertised routers, withdrawing the controller's own default route
+   leaves the simulated Freebox default route installed.
+4. Withdrawing the remaining router's own default removes Internet IPv6 routing
+   while retaining the SLAAC address and working on-link IPv6 ping.
+5. An off-link IPv6 connection then fails immediately with ENETUNREACH.
+6. An unchanged client IPv4 DNS destination still works through backup DNAT,
+   including the expected translated reply source and validated DNS answer.
+7. Restoring the native advertisement and primary DNS service restores both.
+8. Namespace cleanup completes and host routing remains unchanged.
+
+The initial run exposed an overly strict comparison of expiring host RA timers;
+the comparison now ignores expiration counters rather than claiming they are
+static. The corrected complete run passes.
+
+Router lifetime and DNS lifetime are independent: the lab explicitly encodes
+both, including zero-lifetime RDNSS withdrawal. It does **not** test a client
+resolver's RDNSS ingestion, DNS caching, Windows/Android/Apple behaviour, TCP DNS,
+application Happy Eyeballs, throughput or migration of existing connections.
+The IPv4 gateway is switched explicitly in this experiment; production ARP
+takeover remains a separate, previously tested mechanism.
+
+This confirms why merely adding RA withdrawal to the LTE router is insufficient:
+an unrelated router cannot withdraw the Freebox's default-router identity.
+The lab simulates withdrawal by each router of its **own** identity; it does not
+authorize impersonating the Freebox on the household LAN. See
+[RFC 4861 section 6.3.4](https://www.rfc-editor.org/rfc/rfc4861.html#section-6.3.4)
+and [RFC 8106 section 5.1](https://www.rfc-editor.org/rfc/rfc8106.html#section-5.1).
+
+### Production decision gate
+
+The clean next pilot is a separate test LAN with one deliberately controlled
+dual-stack gateway and DNS service, leaving household devices on their current
+Freebox LAN. A delegated Freebox prefix, an appropriate separate network segment
+and measured VM forwarding are prerequisites, not assumptions. Evaluate those
+before moving any household clients. Do not route normal Ultra fibre traffic
+through the MR6400's 100 Mbps ports, use competing high-priority RAs as a workaround,
+or release the existing IPv6 interlock based solely on this Linux lab.
+
+No Freebox delegation, household RA/DHCP/DNS policy or automatic takeover setting
+was changed by this experiment. Those production topology changes remain a
+separate approval and acceptance-test step.
+
+After the lab, the existing marked backup path again passed three health probes,
+carrier-proxy UDP/TCP DNS, verified TLS 1.3 and a 1 MiB transfer in 1.23 seconds
+(about 6.83 Mbps including setup). Direct public UDP DNS remained blocked by the
+roaming path as previously observed; the configured carrier proxy succeeded.
+Primary HTTPS also passed, temporary routing was cleaned up, and the monitor was
+restarted. The service journal had no warning/error entries during this check.
