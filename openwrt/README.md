@@ -105,9 +105,18 @@ Observed checks on 2026-10-21 UTC (2026-10-22 local time):
   reboot also pass subsequent verified HTTPS checks.
 - Nine TFTP checks and twelve watchdog state/debounce/cooldown checks pass.
 
-The router remains directly connected to the PC at this stage. Marked VM
-forwarding/NAT checks after reconnecting the Freebox and household failover
-acceptance are still pending.
+After reconnecting the router to the Freebox LAN, marked VM forwarding/NAT
+checks also pass: three health samples, UDP/TCP DNS through the backup router,
+verified TLS 1.3 and a 1 MiB download in 1.84 seconds (about 4.56 Mbps including
+setup, not a throughput benchmark). Backup and primary egress are distinct.
+Public UDP resolvers remain unreachable through this roaming SIM, so use the
+router's carrier-DNS proxy rather than hard-coding public DNS.
+
+The temporary policy rule, routing table and nftables table are removed after
+the probe; normal fibre routing and monitor-only service are restored. The PC's
+temporary USB addressing/firewall changes are also removed. Household failover
+acceptance remains pending the [Freebox IPv6 design](../docs/FREEBOX-IPV6.md)
+and separate user approval.
 
 Successful DNS, HTTPS and downloads on the router prove cellular egress, not
 household failover. Repeat checks after cold boot, warm reboot and a WAN

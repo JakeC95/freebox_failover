@@ -52,11 +52,21 @@ addresses, even when DNS uses the backup router.
 
 This mode does **not** provide IPv6 failover, NAT66, delegated prefixes or RA
 impersonation. Existing Freebox IPv6 routes can blackhole applications when fibre
-fails. For a predictable IPv4-only deployment, disable IPv6 advertising on the
-LAN at the Freebox, wait for/clear old client IPv6 routes, and verify the clients
+fails. A predictable IPv4-only deployment requires a supported way to stop
+IPv6 Internet routing on the client LAN, followed by expiry/removal of old
+client IPv6 routes and verification of the clients
 before setting `lan_ipv6_disabled = true`. That setting is a human acknowledgement,
 not an automatic check. Do not set it merely to bypass the interlock. The daemon
 does not change the live Freebox IPv6 configuration for you.
+
+Do not assume the Freebox provides an IPv6/RA off switch. The audited Ultra
+running Freebox OS 4.13.1 exposes firewall, DHCPv6, DNS and prefix-delegation
+settings, but no simple IPv6-disable or RA-disable control in its installed UI.
+DHCPv6 was already off while clients still had working public IPv6 through
+SLAAC. The API's `ipv6_enabled` status field is not proof that disabling it is
+supported. Do not use an invented next hop as a substitute for a verified
+solution. See [the IPv6 audit](docs/FREEBOX-IPV6.md). Keep the acknowledgement
+false and takeover disabled until the network design is resolved.
 
 ## Installation and checks
 
