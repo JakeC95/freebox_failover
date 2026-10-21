@@ -1,29 +1,37 @@
 [build-system]
-requires = ["setuptools>=64", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "freebox-failover"
-version = "0.0.1"
-description = "Freebox failover daemon and Free Mobile SMS notifier"
+version = "0.1.0"
+description = "Freebox Ultra Ethernet failover, diagnostics, and legacy USB support"
 readme = "README.md"
 requires-python = ">=3.9"
-license = { file = "LICENSE" }
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
 authors = [{ name = "Laurent Vivier" }, { email = "laurent@vivier.eu" }]
 dependencies = [
     "requests",
     "scapy",
-    "systemd-python",
     "ping3",
 ]
 
+[project.optional-dependencies]
+journal = ["systemd-python"]
+
+[project.urls]
+Repository = "https://github.com/JakeC95/freebox_failover"
+Upstream = "https://github.com/vivier/freebox_failover"
+
+[project.scripts]
+freebox-ethernet = "freebox_ethernet:main"
+freebox-register = "freebox_failover_register:main"
+
 [tool.setuptools]
-py-modules = ["freebox_failover", "freebox_failover_register"]
-script-files = ["freebox_failover.py", "freebox_failover_register.py"]
+py-modules = ["freebox_api", "freebox_failover", "freebox_failover_register", "freebox_ethernet"]
+script-files = ["freebox_failover.py", "freebox_failover_register.py", "freebox_ethernet.py"]
 include-package-data = true
 
 [tool.setuptools.data-files]
-"/etc" = ["freebox_failover.conf"]
-"/etc/default" = ["systemd/freebox_failover.env"]
-"/usr/lib/systemd/system" = ["freebox_failover.service"]
-"/usr/share/freebox-failover" = ["cloud-init-user-data.yaml"]
+"share/freebox-failover" = ["freebox_failover.conf", "freebox_ethernet.conf", "systemd/freebox_failover.env", "freebox_failover.service", "freebox_ethernet.service", "cloud-init-user-data.yaml", "cloud-init-freebox-ultra.yaml", "README.md", "ETHERNET.md", "OPERATIONS.md", "VALIDATION.md", "install-freebox-ultra.sh"]

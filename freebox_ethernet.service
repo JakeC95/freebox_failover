@@ -1,0 +1,31 @@
+[Unit]
+Description=Freebox Ethernet backup (monitor-only until explicitly enabled)
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=notify
+NotifyAccess=main
+User=root
+WorkingDirectory=/etc
+Environment=FAILOVER_SCRIPT=/usr/bin/freebox_ethernet.py
+Environment=CONFIG_FILE=/etc/freebox_ethernet.conf
+ExecStart=/usr/bin/python3 -u ${FAILOVER_SCRIPT} -c ${CONFIG_FILE}
+ExecStopPost=/usr/bin/python3 ${FAILOVER_SCRIPT} -c ${CONFIG_FILE} --cleanup
+Environment=PYTHONDONTWRITEBYTECODE=1
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=40
+TimeoutStartSec=90
+WatchdogSec=90
+WatchdogSignal=SIGTERM
+LimitCORE=0
+UMask=0077
+NoNewPrivileges=true
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,31 @@
+#cloud-config
+hostname: freeboxfailover
+manage_etc_hosts: true
+disable_root: true
+ssh_pwauth: false
+users:
+  - name: freebox
+    groups: [sudo]
+    shell: /bin/bash
+    lock_passwd: true
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    ssh_authorized_keys:
+      - REPLACE_WITH_YOUR_SSH_PUBLIC_KEY
+package_update: true
+package_reboot_if_required: false
+packages:
+  - python3-requests
+  - python3-scapy
+  - nftables
+  - iproute2
+  - libpcap0.8
+  - git
+write_files:
+  - path: /etc/systemd/journald.conf.d/failsafe-storage.conf
+    permissions: '0644'
+    content: |
+      [Journal]
+      Storage=volatile
+      RuntimeMaxUse=32M
+runcmd:
+  - [systemctl, restart, systemd-journald]

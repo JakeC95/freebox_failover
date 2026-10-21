@@ -1,13 +1,13 @@
 #cloud-config
 ssh_authorized_keys:
   - ssh-rsa XXXXXX
+ssh_pwauth: false
+disable_root: true
 
 system_info:
   default_user:
     name: freebox
-    # passwd is freebox, generate a new one with mkpasswd --method=SHA-512 --rounds=4096
-    passwd: $6$rounds=4096$TWMyNF365GbkiHih$NCGKVPbiLKn03a5hNurvHnMGQnzUDSPjLK6zsjfdtM.WI5J0nB054AF72Qb1jb0zp8sLnl61V0ui9Ks4iT2xA1
-    lock_passwd: false
+    lock_passwd: true
   groups:
     - freebox
 
@@ -25,26 +25,31 @@ write_files:
   path: /etc/sysctl.d/99-ipforward.conf
 # Enabling masquerading and forwarding
 - content: |
-    flush ruleset
+    add table ip freebox_usb_nat4
+    flush table ip freebox_usb_nat4
+    add table ip6 freebox_usb_nat6
+    flush table ip6 freebox_usb_nat6
+    add table inet freebox_usb_filter
+    flush table inet freebox_usb_filter
 
-    table ip nat {
+    table ip freebox_usb_nat4 {
             chain POSTROUTING {
                     type nat hook postrouting priority srcnat; policy accept;
-                    oif "usb0" masquerade
+                    oifname "usb0" masquerade
             }
     }
-    table ip6 nat {
+    table ip6 freebox_usb_nat6 {
             chain POSTROUTING {
                     type nat hook postrouting priority srcnat; policy accept;
-                    oif "usb0" masquerade
+                    oifname "usb0" masquerade
             }
     }
-    table inet filter {
+    table inet freebox_usb_filter {
             chain forward {
                     type filter hook forward priority filter; policy drop;
-                    iif "eth0" oif "usb0" ct state established,related,new accept
-                    iif "usb0" oif "eth0" ct state established,related accept
-                    iif "eth0" oif "eth0" accept
+                    iifname "eth0" oifname "usb0" ct state established,related,new accept
+                    iifname "usb0" oifname "eth0" ct state established,related accept
+                    iifname "eth0" oifname "eth0" accept
             }
     }
   path: /etc/sysconfig/nftables.conf

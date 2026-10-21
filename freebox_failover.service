@@ -5,11 +5,19 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 /usr/bin/freebox_failover.py
+Environment=CONFIG_FILE=/etc/freebox_failover.conf
+EnvironmentFile=-/etc/default/freebox_failover.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 -u /usr/bin/freebox_failover.py -c ${CONFIG_FILE} $EXTRA_ARGS
 WorkingDirectory=/etc
 
 # Run as root since raw sockets, ARP/NDP, and systemd-journal access are required
 User=root
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=30
+UMask=0077
+LimitCORE=0
 
 [Install]
 WantedBy=multi-user.target

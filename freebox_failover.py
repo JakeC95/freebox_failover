@@ -1,4 +1,4 @@
-#!/bin/python
+#!/usr/bin/env python3
 """Freebox failover gateway helper
 
 This daemon watches the WAN state of a Freebox and, when the fiber link goes
@@ -14,20 +14,22 @@ re-announces the Freebox MAC/addresses, and restores normal operation.
 Configuration is read from "/etc/freebox_failover.conf".
 """
 import os, sys
-import requests, json
-import hashlib, hmac
 import time, threading
+import math
+import signal
 from datetime import datetime
 from scapy.all import (
-    get_if_hwaddr, Ether, ARP, sendp, conf, sniff, in6_getifaddr,
+    get_if_hwaddr, Ether, ARP, sendp, conf, AsyncSniffer, in6_getifaddr,
     IPv6, ICMPv6ND_NS, ICMPv6ND_NA, ICMPv6ND_RA, ICMPv6NDOptMTU,
-    ICMPv6NDOptSrcLLAddr, ICMPv6NDOptPrefixInfo, ICMPv6NDOptRDNSS
+    ICMPv6NDOptSrcLLAddr, ICMPv6NDOptDstLLAddr, ICMPv6NDOptPrefixInfo, ICMPv6NDOptRDNSS
 )
 import ipaddress
 import ping3
 import urllib.parse, urllib.request
 import argparse
 import configparser
+
+from freebox_api import ApiError, FreeboxClient, load_token
 
 ping3.EXCEPTIONS = True
 
@@ -38,6 +40,7 @@ DEVICE_NAME	= "linux"
 
 failover_active = threading.Event()
 stop_thread	= threading.Event()
+network_failed = threading.Event()
 
 def timestamp():
     """Create an ISO-like timestamp"""
@@ -67,60 +70,57 @@ parser.add_argument(
     help="here to send logs: stdout, stderr or journald (default: stdout)"
 )
 
-args = parser.parse_args()
+_log_stream = sys.stdout
+_api_client = None
 
-if args.log_output == "journald":
-    from systemd import journal
 
-    journald = journal.stream(APP_NAME)
+def log(message):
+    print(f"{timestamp()} {message}", file=_log_stream, flush=True)
 
-    def log(msg):
-        print(msg, file=journald)
-elif args.log_output == "stderr":
-    import sys
 
-    def log(msg):
-        print(f"{timestamp()} {msg}", file=sys.stderr)
-else:
-    def log(msg):
-        print(f"{timestamp()} {msg}")
-
-if not os.path.exists(args.config):
-    log(f"Configuration file {args.config} does not exist.")
-    sys.exit(1)
-
-config = configparser.ConfigParser()
-config.read(args.config)
-
-FREEMOBILE_USER = config['SMS']['user']
-FREEMOBILE_PASS = config['SMS']['pass']
-TOKEN_FILE	= args.token_file or config['freebox']['token_file']
-LAN_IFACE	= config['freebox']['lan_iface']
-FREEBOX_IP = config['freebox']['ip']
-FREEBOX_IPV6LL = config['freebox']['ipv6ll']
-
-CHECK_PERIOD_S	= config['failover'].getint('check', fallback=2)
-DOWN_THRESHOLD_S= config['failover'].getint('down', fallback=6)
-UP_THRESHOLD_S	= config['failover'].getint('up', fallback=10)
-GARPS_EVERY_S   = config['failover'].getint('garp', fallback=3)
-
-FAILOVER_PREFIX = config.get('ipv6', 'prefix', fallback='fd00:1234::/64').strip()
-RDNSS_LIST = [s for s in config.get('ipv6', 'rdnss', fallback='').split() if s]
-ROUTER_LIFETIME = config['ipv6'].getint('router_lifetime', fallback=30)
-
-API_URL		= f"http://{FREEBOX_IP}/api/v8"
-
-HOST_PING_CHECK="212.27.48.10"
-CHECK_THRESHOLD_S=CHECK_PERIOD_S * 10
+def configure(argv=None):
+    global _log_stream, _api_client, FREEMOBILE_USER, FREEMOBILE_PASS, TOKEN_FILE
+    global LAN_IFACE, FREEBOX_IP, FREEBOX_IPV6LL, CHECK_PERIOD_S, DOWN_THRESHOLD_S
+    global UP_THRESHOLD_S, GARPS_EVERY_S, FAILOVER_PREFIX, RDNSS_LIST, ROUTER_LIFETIME
+    global HOST_PING_CHECK, CHECK_THRESHOLD_S, BACKUP_IFACE
+    args = parser.parse_args(argv)
+    if args.log_output == "journald":
+        from systemd import journal
+        _log_stream = journal.stream(APP_NAME)
+    else:
+        _log_stream = sys.stderr if args.log_output == "stderr" else sys.stdout
+    config = configparser.ConfigParser(interpolation=None)
+    if not config.read(args.config):
+        raise ValueError(f"Configuration file {args.config} does not exist")
+    FREEMOBILE_USER = config.get('SMS', 'user', fallback='')
+    FREEMOBILE_PASS = config.get('SMS', 'pass', fallback='')
+    TOKEN_FILE = args.token_file or config['freebox']['token_file']
+    LAN_IFACE = config['freebox']['lan_iface']
+    FREEBOX_IP = str(ipaddress.IPv4Address(config['freebox']['ip']))
+    FREEBOX_IPV6LL = config.get('freebox', 'ipv6ll', fallback='')
+    CHECK_PERIOD_S = config.getfloat('failover', 'check', fallback=2)
+    DOWN_THRESHOLD_S = config.getfloat('failover', 'down', fallback=6)
+    UP_THRESHOLD_S = config.getfloat('failover', 'up', fallback=10)
+    GARPS_EVERY_S = config.getfloat('failover', 'garp', fallback=3)
+    if any(not math.isfinite(value) or value <= 0 for value in (
+            CHECK_PERIOD_S, DOWN_THRESHOLD_S, UP_THRESHOLD_S, GARPS_EVERY_S)):
+        raise ValueError("Timing values must be finite and positive")
+    FAILOVER_PREFIX = config.get('ipv6', 'prefix', fallback='fd00:1234::/64').strip()
+    RDNSS_LIST = config.get('ipv6', 'rdnss', fallback='').split()
+    ROUTER_LIFETIME = config.getint('ipv6', 'router_lifetime', fallback=30)
+    BACKUP_IFACE = config.get('failover', 'backup_iface', fallback='usb0')
+    HOST_PING_CHECK = config.get('failover', 'probe_host', fallback='1.1.1.1')
+    CHECK_THRESHOLD_S = CHECK_PERIOD_S * 10
+    _api_client = FreeboxClient(FREEBOX_IP, TOKEN_FILE)
 
 def check_connectivity(host="8.8.8.8", timeout=0.5):
     """Use ping to check backup connectivity"""
     try:
-        reply = ping3.ping(host, timeout=timeout)
-    except ping3.errors.PingError as exc:
+        reply = ping3.ping(host, timeout=timeout, interface=BACKUP_IFACE)
+    except (ping3.errors.PingError, OSError) as exc:
         log(f"Connectivity check error: {exc}")
         return False
-    return True
+    return reply is not None and reply is not False
 
 def send_SMS(message):
     """Send an SMS notification via the Free Mobile SMS API.
@@ -135,12 +135,15 @@ def send_SMS(message):
     Performs an HTTPS GET to Free Mobile's API. Logs an error to journald
     if the request fails.
     """
+    if not FREEMOBILE_USER or not FREEMOBILE_PASS or FREEMOBILE_USER.startswith('X'):
+        return
     try:
         payload = { 'user': FREEMOBILE_USER, 'pass': FREEMOBILE_PASS, 'msg': message }
         params = urllib.parse.urlencode(payload, quote_via=urllib.parse.quote)
-        urllib.request.urlopen('https://smsapi.free-mobile.fr/sendmsg?%s' % params, timeout=5)
+        with urllib.request.urlopen('https://smsapi.free-mobile.fr/sendmsg?%s' % params, timeout=5):
+            pass
     except Exception as e:
-        log(f"SMS send failed: {e}")
+        log(f"SMS send failed ({type(e).__name__})")
 
 
 def load_app_token():
@@ -151,19 +154,11 @@ def load_app_token():
     tuple[str|None, str|None]
         (app_token, track_id) if present; (None, None) otherwise.
     """
-    if not os.path.exists(TOKEN_FILE):
-        return None, None
-
     try:
-        with open(TOKEN_FILE, "r", encoding="utf-8") as file:
-            data = json.load(file)
-            return data["app_token"], data["track_id"]
-    except (json.JSONDecodeError, KeyError) as exc:
-        log(f"Token file invalid ({TOKEN_FILE}): {exc}. Delete and re-register.")
-    except OSError as exc:
-        log(f"Could not read token file {TOKEN_FILE}: {exc}")
-
-    return None, None
+        return load_token(TOKEN_FILE)
+    except ApiError as error:
+        log(str(error))
+        return None, None
 
 def api_request(method, endpoint, session_token=None, **kwargs):
     """Call a Freebox OS API endpoint and return its `result` payload.
@@ -189,28 +184,14 @@ def api_request(method, endpoint, session_token=None, **kwargs):
     ------------
     Logs API/network/JSON errors to journald.
     """
-    headers = {}
     if session_token:
-        headers["X-Fbx-App-Auth"] = session_token
-
+        _api_client.session.headers["X-Fbx-App-Auth"] = session_token
     try:
-        response = requests.request(method, f"{API_URL}{endpoint}", headers=headers,
-                                    timeout=5, **kwargs)
-        response.raise_for_status()
-        data = response.json()
-        if data.get('success'):
-            return data.get('result')
-        else:
-            log(f"API Error on {endpoint}: {data.get('msg')}")
-    except requests.exceptions.HTTPError as e:
-        if e.response.status_code == 403:
-            return "forbidden" # Return a special string for 403 errors
-        else:
-            log(f"HTTP Error on {endpoint}: {e}")
-    except requests.exceptions.RequestException as e:
-        log(f"Network Error on {endpoint}: {e}")
-    except json.JSONDecodeError:
-        log(f"JSON Decode Error on {endpoint}")
+        return _api_client.request(method, endpoint, **kwargs)
+    except ApiError as error:
+        if error.code in ("auth_required", "invalid_session", "http_403"):
+            return "forbidden"
+        log(str(error))
     return None
 
 def freebox_connect():
@@ -229,35 +210,12 @@ def freebox_connect():
     ------------
     Logs status messages to journald.
     """
-    app_token, track_id = load_app_token()
-    if not app_token or not track_id:
-        log("App token missing. Run freebox_failover_register.py before starting.")
+    try:
+        _api_client.login()
+        return _api_client.session.headers["X-Fbx-App-Auth"]
+    except ApiError as error:
+        log(str(error))
         return None
-
-    challenge_data = api_request("get", f"/login/authorize/{track_id}")
-    if challenge_data == "forbidden":
-        log("Freebox rejected stored app token (403). Delete token file and re-register.")
-        return None
-    if not challenge_data or not isinstance(challenge_data, dict):
-        log("Failed to get challenge, token might be invalid.")
-        return None
-    challenge = challenge_data.get('challenge')
-    if not challenge:
-        log("Challenge missing from Freebox response.")
-        return None
-
-    password = hmac.new(app_token.encode(), challenge.encode(), hashlib.sha1).hexdigest()
-
-    login_data = api_request("post", "/login/session/",
-                             json={"app_id": APP_ID, "password": password})
-    if login_data == "forbidden":
-        log("Login forbidden – app token probably revoked. Re-register and retry.")
-        return None
-    if not isinstance(login_data, dict):
-        log("Unexpected login response format.")
-        return None
-
-    return login_data.get('session_token')
 
 def freebox_get_link_state(session_token):
     """Return the WAN link state string from the Freebox.
@@ -293,7 +251,7 @@ def freebox_get_hwaddr(session_token):
         MAC address string like 'aa:bb:cc:dd:ee:ff', or None on error.
     """
     system_info = api_request("get", "/system/", session_token)
-    return system_info['mac'] if system_info else None
+    return system_info.get('mac') if isinstance(system_info, dict) else None
 
 def freebox_get_ip(session_token):
     """Get the Freebox LAN IPv4 gateway address.
@@ -309,7 +267,7 @@ def freebox_get_ip(session_token):
         IPv4 address string of the LAN gateway, or None on error.
     """
     lan_config = api_request("get", "/lan/config/", session_token)
-    return lan_config['ip'] if lan_config else None
+    return lan_config.get('ip') if isinstance(lan_config, dict) else None
 
 def freebox_get_ipv6_ll(session_token):
     """Retrieve the Freebox's link-local IPv6 address, with fallback to config.
@@ -326,8 +284,8 @@ def freebox_get_ipv6_ll(session_token):
     """
     lan_config = api_request("get", "/connection/ipv6/config/", session_token)
 
-    if not lan_config or not lan_config.get('ipv6ll'):
-        log(f"No link-local from Freebox, using configuration ({FREEBOX_IPV6LL}")
+    if not isinstance(lan_config, dict) or not lan_config.get('ipv6ll'):
+        log(f"No link-local from Freebox, using configuration ({FREEBOX_IPV6LL})")
         return FREEBOX_IPV6LL
 
     fb_ll = lan_config.get("ipv6ll")
@@ -357,7 +315,7 @@ def send_garp(gateway_ip, mac):
     mac : str
         The MAC address to advertise as owner of `gateway_ip`.
     """
-    pkt = Ether(dst="ff:ff:ff:ff:ff:ff", src=mac) / \
+    pkt = Ether(dst="ff:ff:ff:ff:ff:ff", src=my_mac()) / \
           ARP(op=2, psrc=gateway_ip, pdst=gateway_ip,
               hwsrc=mac, hwdst="ff:ff:ff:ff:ff:ff")
     sendp(pkt, iface=LAN_IFACE, count=3, inter=0.2, verbose=False)
@@ -372,13 +330,13 @@ def send_na(gateway_ipv6, mac):
     mac : str
         The MAC address to advertise as owner of `gateway_ipv6`.
     """
-    pkt = Ether(dst="33:33:00:00:00:01", src=mac) / \
-          IPv6(src=gateway_ipv6, dst="ff02::1") / \
+    pkt = Ether(dst="33:33:00:00:00:01", src=my_mac()) / \
+          IPv6(src=gateway_ipv6, dst="ff02::1", hlim=255) / \
           ICMPv6ND_NA(
               tgt=gateway_ipv6,
               R=1, S=0, O=1 # Router flag, not Solicited, Override flag
           ) / \
-          ICMPv6NDOptSrcLLAddr(lladdr=mac)
+          ICMPv6NDOptDstLLAddr(lladdr=mac)
     sendp(pkt, iface=LAN_IFACE, count=3, inter=0.2, verbose=False)
 
 def get_link_local_addr(iface):
@@ -432,7 +390,7 @@ def build_ra_pkt(iface, src_ll, lladdr, router_lifetime, advertise_prefix=None, 
         The fully-constructed RA `Packet` ready to send with `sendp`.
     """
     ra = (Ether(dst="33:33:00:00:00:01", src=lladdr) /
-          IPv6(src=src_ll, dst="ff02::1") /
+          IPv6(src=src_ll, dst="ff02::1", hlim=255) /
           ICMPv6ND_RA(
               chlim=64,
               M=0, O=1,         # SLAAC + provide other config (DNS)
@@ -546,7 +504,8 @@ def manage_failover_networking(gateway_ip, gateway_ipv6):
             return
 
         # IPv4: ARP "who-has" request
-        if ARP in pkt and pkt[ARP].op == 1 and pkt[ARP].pdst == gateway_ip:
+        if (ARP in pkt and pkt[ARP].op == 1 and pkt[ARP].pdst == gateway_ip
+                and pkt[ARP].hwsrc != my_hwaddr and pkt[ARP].psrc != gateway_ip):
             # who-has gateway_ip? Tell <my_mac>
             reply = Ether(dst=pkt[Ether].src, src=my_hwaddr) / \
                     ARP(op=2, psrc=gateway_ip, pdst=pkt[ARP].psrc,
@@ -554,11 +513,13 @@ def manage_failover_networking(gateway_ip, gateway_ipv6):
             sendp(reply, iface=LAN_IFACE, verbose=False)
 
         # IPv6: Neighbor Solicitation request
-        elif ICMPv6ND_NS in pkt and pkt[ICMPv6ND_NS].tgt == gateway_ipv6:
+        elif (ICMPv6ND_NS in pkt and pkt[ICMPv6ND_NS].tgt == gateway_ipv6
+              and pkt[IPv6].hlim == 255 and pkt[IPv6].src not in ('::', gateway_ipv6)
+              and pkt[Ether].src != my_hwaddr):
             reply = Ether(dst=pkt[Ether].src, src=my_hwaddr) / \
-                    IPv6(src=gateway_ipv6, dst=pkt[IPv6].src) / \
+                    IPv6(src=gateway_ipv6, dst=pkt[IPv6].src, hlim=255) / \
                     ICMPv6ND_NA(tgt=gateway_ipv6, R=1, S=1, O=1) / \
-                    ICMPv6NDOptSrcLLAddr(lladdr=my_hwaddr)
+                    ICMPv6NDOptDstLLAddr(lladdr=my_hwaddr)
             sendp(reply, iface=LAN_IFACE, verbose=False)
 
     def announcer():
@@ -592,9 +553,25 @@ def manage_failover_networking(gateway_ip, gateway_ipv6):
     announcer_thread = threading.Thread(target=announcer, daemon=True)
     announcer_thread.start()
 
-    # Sniff for both ARP (IPv4) and ICMPv6 (for NDP) packets
-    sniff(iface=LAN_IFACE, filter="arp or icmp6", prn=handle_requests, store=False, \
-          stop_filter=lambda p: stop_thread.is_set())
+    ready = threading.Event()
+    sniffer = AsyncSniffer(iface=LAN_IFACE, filter="arp or icmp6", prn=handle_requests,
+                          store=False, started_callback=ready.set)
+    try:
+        sniffer.start()
+        if not ready.wait(5):
+            raise RuntimeError("Packet responder could not start")
+        while not stop_thread.wait(0.5):
+            if not announcer_thread.is_alive() or not sniffer.running:
+                raise RuntimeError("Gateway announcer stopped")
+    except Exception as error:
+        log(f"Network handler failed ({type(error).__name__})")
+        network_failed.set()
+        stop_thread.set()
+    finally:
+        stop_thread.set()
+        if sniffer.running:
+            sniffer.stop()
+        announcer_thread.join(timeout=5)
 
     log("Network handler stopped")
 
@@ -642,6 +619,8 @@ def switch_to_primary_gateway(freebox_ip, freebox_ipv6, freebox_hwaddr, reason):
         Human-readable reason for switching (e.g., "Freebox UP").
         Included in the log output.
     """
+    if not failover_active.is_set():
+        return
     log(f"Switch to primary gateway ({reason})")
     failover_active.clear()
     send_garp(freebox_ip, freebox_hwaddr)
@@ -673,23 +652,24 @@ def main():
     Runs indefinitely until interrupted; logs to journald; sends SMS alerts.
     """
 
-    if not check_connectivity(host=HOST_PING_CHECK):
-        log("Connectivity check failed, exiting.")
-        return
-    else:
-        log(f"Connectivity check succeeded to {HOST_PING_CHECK}")
+    stop_thread.clear()
+    network_failed.clear()
+    failover_active.clear()
+    for signum in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(signum, lambda *_: stop_thread.set())
 
     session_token = freebox_connect()
     if not session_token:
         log("Could not connect to Freebox. Exiting.")
-        return
+        return 1
 
     freebox_hwaddr = freebox_get_hwaddr(session_token)
     freebox_ip = freebox_get_ip(session_token)
     freebox_ipv6 = freebox_get_ipv6_ll(session_token)
     if not all([freebox_hwaddr, freebox_ip]):
         log("Could not retrieve Freebox network details. Exiting.")
-        return
+        _api_client.close()
+        return 1
 
     log(f"Starting failover monitor on {LAN_IFACE} (gw4={freebox_ip}, gw6={freebox_ipv6 or 'N/A'})")
 
@@ -701,12 +681,14 @@ def main():
 
     down_since = None
     up_since = None
-    check_since = time.time()
+    check_since = time.monotonic()
 
     try:
-        while True:
+        while not stop_thread.is_set():
+            if not net_thread.is_alive():
+                raise RuntimeError("Network handler stopped")
             state = freebox_get_link_state(session_token)
-            now = time.time()
+            now = time.monotonic()
 
             if state == "forbidden":
 
@@ -714,44 +696,60 @@ def main():
                 if new_token:
                     session_token = new_token
                 else:
-                    log("Failed to re-login. Exiting; re-register token first.")
-                    break
-
-                time.sleep(CHECK_PERIOD_S * 2)
-                continue
+                    log("Failed to re-login; treating API state as unknown")
+                state = None
 
             if state == "up":
-                up_since = up_since or now
+                if failover_active.is_set() and not check_connectivity(host=HOST_PING_CHECK):
+                    switch_to_primary_gateway(freebox_ip, freebox_ipv6, freebox_hwaddr, "Backup unavailable")
+                up_since = now if up_since is None else up_since
                 down_since = None
                 if failover_active.is_set() and (now - up_since) >= UP_THRESHOLD_S:
                     log("Freebox back UP")
                     switch_to_primary_gateway(freebox_ip, freebox_ipv6, freebox_hwaddr, "Up")
                     send_SMS("Freebox back UP")
-            else:
-                down_since = down_since or now
+            elif state in ("down", "going_up", "going_down"):
+                down_since = now if down_since is None else down_since
                 up_since = None
-                if not failover_active.is_set() and (now - down_since) >= DOWN_THRESHOLD_S:
+                backup_healthy = check_connectivity(host=HOST_PING_CHECK)
+                if failover_active.is_set() and not backup_healthy:
+                    switch_to_primary_gateway(freebox_ip, freebox_ipv6, freebox_hwaddr, "Backup unavailable")
+                if backup_healthy and not failover_active.is_set() and (now - down_since) >= DOWN_THRESHOLD_S:
                     log(f"Freebox DOWN (state {state})")
                     switch_to_backup_gateway("Down")
                     send_SMS(f"Freebox DOWN (state {state})")
+            else:
+                down_since = None
+                up_since = None
+                switch_to_primary_gateway(freebox_ip, freebox_ipv6, freebox_hwaddr, "API state unknown")
 
             if (now - check_since) >= CHECK_THRESHOLD_S:
                 check_since = now
                 if not check_connectivity(host=HOST_PING_CHECK):
                     log("Warning: backup link is down")
 
-            time.sleep(CHECK_PERIOD_S)
+            stop_thread.wait(CHECK_PERIOD_S)
     except KeyboardInterrupt:
         log("Stopping (SIGINT)")
     finally:
         stop_thread.set()
         if failover_active.is_set():
             log("Handing back gateway control on exit.")
-        switch_to_primary_gateway(freebox_ip, freebox_ipv6, freebox_hwaddr, "Exit");
+        try:
+            switch_to_primary_gateway(freebox_ip, freebox_ipv6, freebox_hwaddr, "Exit")
+        finally:
+            net_thread.join(timeout=5)
+            _api_client.close()
+    return 1 if network_failed.is_set() else 0
 
 if __name__ == "__main__":
     if os.geteuid() != 0:
         sys.exit("ERROR: this script must be run as root. Try: sudo " + " ".join(sys.argv))
 
-    conf.verb = 0
-    main()
+    try:
+        configure()
+        conf.verb = 0
+        raise SystemExit(main())
+    except (ValueError, OSError, RuntimeError, configparser.Error) as error:
+        log(str(error))
+        raise SystemExit(1)
