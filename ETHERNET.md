@@ -40,7 +40,13 @@ and the backup routing table, so successful fibre connectivity cannot make the
 backup appear healthy. At least one TCP/443 connection must succeed. This is
 reachability testing, not proof of DNS correctness or absence of a captive portal.
 During takeover, UDP/TCP DNS requests to the Freebox IPv4 address are redirected
-to the configured public DNS resolver. Other DNS configurations are unchanged.
+to the configured DNS resolver. Other DNS configurations are unchanged.
+The `dns` setting accepts a public IPv4 resolver or the configured `backup_gateway`
+when that router provides a LAN DNS proxy. Test UDP and TCP DNS through the backup
+before arming: some mobile/roaming networks block third-party resolvers. Using the
+router's DNS proxy lets its upstream DNS follow the SIM/operator automatically;
+do not point it back at the Freebox. Health probe hosts must remain public IPv4
+addresses, even when DNS uses the backup router.
 
 ## IPv6 limitation — must resolve before arming
 

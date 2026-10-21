@@ -120,9 +120,13 @@ class Settings:
         self.probes = config.get("ethernet", "probe_hosts", fallback="1.1.1.1 9.9.9.9").split()
         if len(set(self.probes)) < 2:
             raise ValueError("Configure at least two distinct public IPv4 probe hosts")
-        for host in self.probes + [self.dns]:
-            if not ipaddress.IPv4Address(host).is_global:
-                raise ValueError("Probe and DNS addresses must be public IPv4 addresses")
+        for host in self.probes:
+            address = ipaddress.IPv4Address(host)
+            if not address.is_global or address.is_multicast:
+                raise ValueError("Probe addresses must be public IPv4 addresses")
+        dns_address = ipaddress.IPv4Address(self.dns)
+        if (not dns_address.is_global or dns_address.is_multicast) and self.dns != self.backup:
+            raise ValueError("DNS must be a public IPv4 address or the backup gateway")
         self.period = config.getfloat("failover", "check", fallback=2)
         self.down = config.getfloat("failover", "down", fallback=10)
         self.up = config.getfloat("failover", "up", fallback=20)
