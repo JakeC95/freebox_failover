@@ -23,6 +23,8 @@ include tools/rollout_preflight.py
 include tools/openwrt_ap_audit.py
 include tools/gateway_benchmark.py
 include tools/windows_gateway_benchmark.py
+include tools/windows_application_fallback.py
+include tools/windows_application_probe.ps1
 include freebox_failover_register.py
 include freebox_failover.conf
 include freebox_failover.service

@@ -130,6 +130,12 @@ def worker(action, state_path):
                             iface="wan0", timeout=1, verbose=False)
             if conflict is not None:
                 raise RuntimeError("Candidate address is in use; refusing to proceed")
+    elif action == "announce-client":
+        origin = get_if_hwaddr("wan0")
+        sendp(Ether(src=origin, dst=state["physical_mac"]) /
+              ARP(op=2, hwsrc=origin, psrc=state["uplink_ip"],
+                  hwdst=state["physical_mac"], pdst=state["physical_client"]),
+              iface="wan0", count=2, inter=0.2, verbose=False)
     elif action == "solicit":
         addresses = json.loads(command("ip", "-j", "-6", "addr", "show", "dev", "wan0"))
         source = next(entry["local"] for interface in addresses
@@ -345,8 +351,8 @@ def run_pilot(arguments):
             raise ValueError("Physical client must be on the upstream LAN")
         if arguments.physical_client in (str(uplink.ip), arguments.primary, arguments.backup):
             raise ValueError("Physical client cannot be a gateway or pilot uplink address")
-        if not re.fullmatch(r"(?:[0-9a-f]{2}:){5}[0-9a-f]{2}", arguments.physical_mac):
-            raise ValueError("Physical MAC must be six lowercase colon-separated octets")
+        if not re.fullmatch(r"(?:[0-9a-f]{2}:){5}[0-9a-f]{2}", arguments.physical_mac) or int(arguments.physical_mac[:2], 16) & 1 or arguments.physical_mac == '00:00:00:00:00:00':
+            raise ValueError("Physical MAC must be a nonzero unicast lowercase Ethernet address")
     elif arguments.physical_client or arguments.physical_mac:
         raise ValueError("Physical clients require bounded external control")
     if arguments.unicast_ra_peer:
@@ -427,17 +433,24 @@ def run_pilot(arguments):
             wait_ipv6_default(available)
 
         def inject_fault(name, enabled):
+            if name == "client_ipv6_blackhole" and not arguments.physical_client:
+                raise ValueError("Silent-drop testing requires an explicit physical client")
             if enabled:
                 faults.add(name)
             else:
                 faults.discard(name)
             inside(gateway, "nft", "flush", "chain", "inet", "pilot", "fault_output")
             inside(gateway, "nft", "flush", "chain", "inet", "pilot", "fault_forward")
+            inside(gateway, "nft", "flush", "chain", "inet", "pilot", "fault_prerouting")
             for path in sorted(faults):
-                marks = {"primary": ("0x71", "0x76"), "backup": ("0x72",), "primary_ipv6": ("0x76",)}[path]
+                marks = {"primary": ("0x71", "0x76"), "backup": ("0x72",), "primary_ipv6": ("0x76",), "client_ipv6_blackhole": ()}[path]
                 for mark in marks:
                     inside(gateway, "nft", "add", "rule", "inet", "pilot", "fault_output",
                            "meta", "mark", mark, "counter", "reject")
+            if "client_ipv6_blackhole" in faults:
+                inside(gateway, "nft", "add", "rule", "inet", "pilot", "fault_prerouting",
+                       "iifname", "wan0", "ether", "saddr", arguments.physical_mac,
+                       "ip6", "saddr", "2000::/3", "ip6", "daddr", "2000::/3", "counter", "drop")
             if faults.intersection(("primary", "primary_ipv6")):
                 inside(gateway, "nft", "add", "rule", "inet", "pilot", "fault_forward",
                        "iifname", "lan0", "meta", "nfproto", "ipv6", "counter", "reject")
@@ -533,7 +546,7 @@ def run_pilot(arguments):
                 if request_path.exists():
                     request = json.loads(request_path.read_text())
                     if request['id'] > last_id:
-                        if request['action'] == 'fault' and request['path'] in ('primary', 'backup', 'primary_ipv6') and isinstance(request['enabled'], bool):
+                        if request['action'] == 'fault' and request['path'] in ('primary', 'backup', 'primary_ipv6', 'client_ipv6_blackhole') and isinstance(request['enabled'], bool):
                             inject_fault(request['path'], request['enabled'])
                         elif request['action'] == 'unicast_ra':
                             last_ra = unicast_ra(request['router_lifetime'], request['dns_lifetime'], request.get('retire_prefix', False), request.get('preference', 3))
@@ -572,6 +585,8 @@ def run_pilot(arguments):
             inside(gateway, "ip", "link", "set", "wan0", "up")
             inside(gateway, "python3", script, "--worker", "address-check", "--state", str(state_file))
             inside(gateway, "ip", "addr", "add", str(uplink), "dev", "wan0")
+            if arguments.physical_client:
+                inside(gateway, "python3", script, "--worker", "announce-client", "--state", str(state_file))
             if arguments.unicast_ra_peer:
                 prefix = ipaddress.IPv6Network(arguments.unicast_ra_prefix)
                 inside(gateway, 'ip', '-6', 'addr', 'add', str(prefix.network_address + 1) + '/64', 'dev', 'wan0')
@@ -609,7 +624,7 @@ def run_pilot(arguments):
             inside(client, "sysctl", "-qw", "net.ipv6.conf.eth0.accept_ra=1")
             inside(gateway, "nft", "add", "table", "inet", "pilot")
             if arguments.automatic:
-                for hook in ("output", "forward"):
+                for hook in ("output", "forward", "prerouting"):
                     inside(gateway, "nft", "add", "chain", "inet", "pilot", "fault_" + hook,
                            f'{{ type filter hook {hook} priority -10; policy accept; }}')
             inside(gateway, "nft", "add", "chain", "inet", "pilot", "input",
@@ -822,7 +837,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument("--run", action="store_true")
-    action.add_argument("--worker", choices=("address-check", "solicit", "advertise", "dns", "dns-check", "isolation-check", "health", "unicast-ra"), help=argparse.SUPPRESS)
+    action.add_argument("--worker", choices=("address-check", "announce-client", "solicit", "advertise", "dns", "dns-check", "isolation-check", "health", "unicast-ra"), help=argparse.SUPPRESS)
     parser.add_argument("--state", help=argparse.SUPPRESS)
     parser.add_argument("--interface", default="enp0s5")
     parser.add_argument("--primary", default="192.168.1.254")

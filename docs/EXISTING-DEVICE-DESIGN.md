@@ -55,6 +55,10 @@ quietly disable IPv6 across clients to satisfy the existing daemon's interlock.
 No changes to Freebox prefix delegation, IPv6 enablement/firewall, DHCP, APs or
 household advertisements were made by this evaluation.
 
+The next [selected-client application fallback test](APPLICATION-FALLBACK.md)
+explicitly distinguishes silent IPv6 loss from immediate rejection and checks
+multiple Windows HTTP stacks. Compatibility results do not remove this gate.
+
 ## Fault coverage boundaries
 
 This can target an ISP/fibre-service outage while the Freebox, its LAN switching,

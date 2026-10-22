@@ -82,6 +82,7 @@ present that decision to the owner before implementing it.
 | IPv6 recovery | Three healthy pinned IPv6 samples restore pilot default | Recovery probe must work while client IPv6 default is withdrawn |
 | Windows SLAAC/RDNSS/router expiry | Selected-client unicast wire capture and SYSTEM rollback pass | Repeat on final segment; not proof of household RA coexistence |
 | Other client families/applications | Not established | Representative Apple/Android/Linux/IoT as applicable; calls/VPN/TV/local discovery |
+| Unusable IPv6 with working cellular IPv4 | [Windows application comparison](APPLICATION-FALLBACK.md) finds .NET deadline failures despite curl fallback | Do not release an IPv4-only takeover policy that merely assumes every app falls back |
 | VM/host/USB failure, reboot | Production topology not established | Independently verified recovery or explicitly accepted downtime |
 | Throughput, MTU/PMTUD and long-running stability | [Selected-client local IPv4 NAT benchmark](GATEWAY-BENCHMARK.md) passes on a 1 GbE client; other limits unqualified | Measure final path without silently accepting a fibre bottleneck |
 | Production rollback | Only pilot rollback and installer backup proven | Rehearse selected topology with an independent deadline guard |
