@@ -41,13 +41,20 @@ An independent router cannot withdraw the Freebox's IPv6 router identity merely
 by withdrawing its own advertisement. Test-only high-priority unicast RAs are
 not the final household solution.
 
-The preferred design to qualify is a separately controlled routed client segment
+One previously evaluated candidate was a separately controlled routed client segment
 with one gateway/RA/DNS policy, native IPv6 while fibre is healthy, and fast
 IPv4 fallback when the available cellular upstream is IPv4-only. It requires an
 actual segment/wiring plan, an agreed prefix/delegation or translation policy,
 and a way to place the required wired and wireless clients behind that gateway.
 Do not assume the Freebox's built-in Wi-Fi, switch or prefix configuration can
 provide that arrangement without verifying them. No purchase is authorized.
+
+The owner prefers decision-making on the existing Freebox/VM and cellular router,
+with no additional always-on gateway and no dependency on the Windows test PC.
+That is now the preparation direction, not a request to buy another router.
+Keep normal fibre traffic directly routed by the Freebox. The
+[existing-device architecture constraints](EXISTING-DEVICE-DESIGN.md) describe
+what is proven and what remains unresolved, especially IPv6 control.
 
 The household has now confirmed external OpenWrt APs, not Freebox Wi-Fi, and an
 unmanaged PoE switch. A [read-only AP audit](ACCESS-POINTS.md) confirms working
@@ -76,7 +83,7 @@ present that decision to the owner before implementing it.
 | Windows SLAAC/RDNSS/router expiry | Selected-client unicast wire capture and SYSTEM rollback pass | Repeat on final segment; not proof of household RA coexistence |
 | Other client families/applications | Not established | Representative Apple/Android/Linux/IoT as applicable; calls/VPN/TV/local discovery |
 | VM/host/USB failure, reboot | Production topology not established | Independently verified recovery or explicitly accepted downtime |
-| Throughput, MTU/PMTUD and long-running stability | Not established | Measure final path without silently accepting a fibre bottleneck |
+| Throughput, MTU/PMTUD and long-running stability | [Selected-client local IPv4 NAT benchmark](GATEWAY-BENCHMARK.md) passes on a 1 GbE client; other limits unqualified | Measure final path without silently accepting a fibre bottleneck |
 | Production rollback | Only pilot rollback and installer backup proven | Rehearse selected topology with an independent deadline guard |
 
 IPv6 health currently verifies TLS to two addresses of one provider and does not

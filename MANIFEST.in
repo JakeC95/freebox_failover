@@ -21,6 +21,8 @@ include tools/windows_ra_acceptance.py
 include tools/capture_probe_ra.py
 include tools/rollout_preflight.py
 include tools/openwrt_ap_audit.py
+include tools/gateway_benchmark.py
+include tools/windows_gateway_benchmark.py
 include freebox_failover_register.py
 include freebox_failover.conf
 include freebox_failover.service

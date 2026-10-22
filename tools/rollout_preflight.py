@@ -14,7 +14,7 @@ import sys
 
 
 REMAINING_GATES = (
-    "approved household topology with a single controlled IPv6 gateway policy",
+    "approved IPv4/IPv6 failover policy using the existing Freebox VM and cellular router",
     "measured gateway throughput and an accepted gateway/VM failure policy",
     "representative household client and application acceptance",
     "independent production rollback rehearsed for the selected topology",
@@ -40,7 +40,7 @@ def evaluate(config, status, service, disk_free, memory_available, namespaces, w
         "primary_api_up": status.get("wan") == "up" and status.get("api_error") is None,
         "disk_headroom": disk_free >= 512 * 1024 * 1024,
         "memory_headroom": memory_available >= 128 * 1024 * 1024,
-        "no_leftover_pilot_namespaces": not any(name.startswith("f4g-pilot-") for name in namespaces),
+        "no_leftover_pilot_namespaces": not any(name.startswith(("f4g-pilot-", "f4g-bench-")) for name in namespaces),
         "systemd_watchdog_configured": watchdog.get("WatchdogUSec") not in (None, "", "0") and watchdog.get("Restart") == "on-failure",
     }
 

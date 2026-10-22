@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory=$true)]
-    [ValidateSet('Snapshot','Arm','TestRollback','Apply','PrepareRA','ReadRA','Restore','Verify','Disarm')]
+    [ValidateSet('Snapshot','Arm','TestRollback','Apply','ApplyBenchmark','PrepareRA','ReadRA','Restore','Verify','Disarm')]
     [string]$Action,
     [Parameter(Mandatory=$true)]
     [string]$RunDirectory,
@@ -210,6 +210,33 @@ if ($Action -eq 'Apply') {
         }
         Add-DnsClientNrptRule -Namespace 'www.cloudflare.com','one.one.one.one' -NameServers $Gateway -Comment $taskName -DisplayName $taskName | Out-Null
         [ordered]@{ Applied=$true; ClientAddressUnchanged=$baseline.ClientAddress; RollbackTask=$taskName } | ConvertTo-Json -Compress
+    } catch {
+        Restore-OwnedChanges | Out-Null
+        throw
+    }
+    exit
+}
+
+if ($Action -eq 'ApplyBenchmark') {
+    $baseline = Read-Baseline
+    $state = Read-State
+    if ($state.Applied -or -not (Test-Configuration).Matched) { throw 'Restore the baseline before benchmarking.' }
+    $task = Get-ScheduledTaskInfo -TaskName $taskName
+    if ($task.NextRunTime -lt (Get-Date).AddMinutes(5)) { throw 'Rearm the rollback task before benchmarking.' }
+    $address = [Net.IPAddress]::Parse($Gateway)
+    if ($address.AddressFamily -ne 'InterNetwork' -or $Gateway -eq $baseline.ClientAddress -or
+        @($baseline.Configuration.Routes | Where-Object { $_.DestinationPrefix -eq '0.0.0.0/0' -and $_.NextHop -eq $Gateway }).Count) {
+        throw 'Use a separate IPv4 pilot gateway, not the household gateway.'
+    }
+    if (Get-NetRoute -AddressFamily IPv4 | Where-Object { $_.DestinationPrefix -match '^198\.(18|19)\.' }) {
+        throw 'Benchmark address space already has a route.'
+    }
+    $state.Routes = @([ordered]@{ Prefix='198.18.71.2/32'; NextHop=$Gateway })
+    $state.Applied = $true
+    Write-PrivateJson $statePath $state
+    try {
+        New-NetRoute -DestinationPrefix '198.18.71.2/32' -InterfaceIndex $baseline.Configuration.InterfaceIndex -NextHop $Gateway -RouteMetric 7 -PolicyStore ActiveStore | Out-Null
+        [ordered]@{ Applied=$true; DefaultRoutesChanged=$false; DNSChanged=$false; RollbackTask=$taskName } | ConvertTo-Json -Compress
     } catch {
         Restore-OwnedChanges | Out-Null
         throw
