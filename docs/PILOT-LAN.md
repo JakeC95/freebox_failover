@@ -50,8 +50,10 @@ sudo timeout --signal=TERM --kill-after=20 240 python3 tools/dual_stack_pilot.py
   --primary 192.168.1.254 --backup 192.168.1.253
 ```
 
-The controller runs explicit primary, backup and primary phases, then removes
-the pilot. Its lock prevents overlapping pilot runs. SIGTERM/SIGHUP use normal
+By default the controller runs explicit primary, backup and primary phases,
+then removes the pilot. The optional automatic scenario below instead makes
+decisions from real path-pinned health probes. Its lock prevents overlapping
+pilot runs. SIGTERM/SIGHUP use normal
 cleanup; SIGKILL or power loss cannot run Python cleanup. Inspect `ip netns list`
 and pilot worker processes after any abnormal termination before another run.
 Do not delete unrelated namespaces. The namespace-specific resolver file is
@@ -85,10 +87,66 @@ IPVLAN. No DHCP configuration, existing lease or household prefix was changed.
 The namespace client uses an explicit resolver configuration. Actual client OS
 RDNSS ingestion, Windows/Android/Apple behaviour, existing connection migration,
 MTU edge cases and gigabit forwarding capacity are not established by these
-checks. Switching is explicitly injected **inside the pilot**, not automatic WAN
-failure detection and not a physical fibre outage. The production daemon remains
+checks. The default scenario uses explicit phase switching. The optional automatic
+scenario detects namespace-injected faults, not a physical fibre outage.
+The production daemon remains
 monitor-only, with its IPv6 safety interlock intact. No test-client LAN is left
 running after successful completion.
 
 Kernel references: [IPVLAN](https://docs.kernel.org/networking/ipvlan.html),
 [IPv6 forwarding and accept_ra](https://docs.kernel.org/networking/ip-sysctl.html).
+
+## Automatic outage-detection scenario
+
+Add `--automatic` to the same command, allowing a 360-second outer timeout:
+
+```sh
+sudo timeout --signal=TERM --kill-after=20 360 python3 tools/dual_stack_pilot.py \
+  --run --automatic --interface enp0s5 \
+  --uplink-address CHECKED_UNUSED_ADDRESS/PREFIX \
+  --primary 192.168.1.254 --backup 192.168.1.253
+```
+
+Each observation checks the two upstreams independently. Socket marks `0x71`
+and `0x72` select namespace-only tables/rules `7171` and `7172`, pinned respectively
+to the Freebox and LTE gateway. A failed primary cannot silently probe through
+the selected backup default route. Each path must return a valid DNS A answer
+through its own gateway and a certificate-verified HTTPS 200 response. HTTPS
+tries `1.1.1.1` and then `1.0.0.1` with verified `one.one.one.one` TLS identity.
+These are [Cloudflare addresses](https://developers.cloudflare.com/1.1.1.1/ip-addresses/),
+not independent providers; production endpoint diversity remains future work.
+This does not replace the roaming carrier's DNS proxy with public UDP DNS.
+
+The decision policy requires:
+
+- Three consecutive failed primary observations before takeover.
+- Two consecutive healthy backup observations before selecting cellular.
+- Three consecutive healthy primary observations before restoring fibre.
+- At least ten seconds between transitions; short recovery bursts reset on
+  another failure. Unknown observations prevent a transition.
+- No oscillation onto a known-failed alternative when both paths fail.
+
+Failure injection changes only the gateway namespace: counted reject rules
+block marked probes for the affected path, an unreachable main default simulates
+selected-path IPv4 loss, and a primary fault rejects forwarded Internet IPv6.
+The controller is not given fabricated healthy/unhealthy values. It must observe
+actual socket/DNS/TLS failures, verify the other path and then change its route,
+DNS upstream and private-LAN IPv6 advertisement. Household fibre remains up.
+
+The complete live scenario passed in 94.1 seconds, including warm-up and injected
+faults. It verifies transient-failure suppression, refusal to select broken
+cellular, automatic takeover once cellular recovers, real cellular HTTPS/DNS,
+both-path failure without oscillation, suppressed flapping recovery, and automatic
+restoration of fibre IPv4/IPv6. Exactly two transitions occurred. Total scenario
+duration is not a promised outage-detection or switchover latency.
+
+Deterministic policy checks cover thresholds, dwell, unknown observations and
+recovery; 50,000 seeded randomized observations produced 269 transitions, all
+meeting the policy's guards. SIGTERM during an injected primary outage also
+removes the pilot fault rules, workers and namespaces, with the host's IPv4/IPv6
+routes, rules, firewall and forwarding matching the original snapshot. Route
+changes are applied before publishing the new DNS/RA phase, and an exited pilot
+worker aborts automatic monitoring rather than continuing with missing services.
+This is still an opt-in pilot, not an installed
+automatic household gateway. IPv6-only upstream failure detection, actual client
+OS behaviour, physical-link outages and real-device acceptance tests remain open.
