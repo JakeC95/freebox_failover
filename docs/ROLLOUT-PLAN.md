@@ -49,6 +49,12 @@ and a way to place the required wired and wireless clients behind that gateway.
 Do not assume the Freebox's built-in Wi-Fi, switch or prefix configuration can
 provide that arrangement without verifying them. No purchase is authorized.
 
+The household has now confirmed external OpenWrt APs, not Freebox Wi-Fi, and an
+unmanaged PoE switch. A [read-only AP audit](ACCESS-POINTS.md) confirms working
+bridged radios/roaming with unchanged configuration and private backups. Keep
+those APs untouched; do not assume switch VLAN isolation or move only Wi-Fi
+clients while forgetting devices connected directly to the Freebox.
+
 Before selecting it, measure forwarding on the actual VM path and establish
 what clients do if the VM, its USB storage or its host fails. A gateway that
 fails over the ISP but turns a VM outage into a household outage is not yet a
