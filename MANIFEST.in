@@ -14,6 +14,9 @@ include cloud-init-freebox-ultra.yaml
 recursive-include docs *.md
 include tools/dual_stack_lab.py
 include tools/dual_stack_pilot.py
+include tools/windows_client_pilot.ps1
+include tools/windows_client_remote.py
+include tools/windows_client_acceptance.py
 include freebox_failover_register.py
 include freebox_failover.conf
 include freebox_failover.service

@@ -167,4 +167,7 @@ default explicit phase switching is not production automatic outage handling.
 The optional automatic pilot scenario now detects real namespace-injected socket,
 DNS and HTTPS failures using independently pinned paths, debounce, backup readiness
 and recovery hysteresis. It has passed live without changing household routing;
-production takeover remains disabled pending real-device and topology acceptance.
+production takeover remains disabled pending topology acceptance. Subsequent
+[real Windows client acceptance](WINDOWS-ACCEPTANCE.md) verifies actual routed
+traffic/fallback and exact settings restoration, without changing household RAs
+or claiming a Windows isolated-LAN RA test.

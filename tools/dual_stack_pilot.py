@@ -7,6 +7,7 @@ import ipaddress
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import socket
 import socketserver
@@ -211,9 +212,11 @@ def worker(action, state_path):
         class TCP6(socketserver.ThreadingTCPServer):
             address_family = socket.AF_INET6
 
-        for address, udp_type, tcp_type in (("10.231.71.1", socketserver.ThreadingUDPServer,
-                                           socketserver.ThreadingTCPServer),
-                                          ("fd42:4242:71::1", UDP6, TCP6)):
+        listeners = [("10.231.71.1", socketserver.ThreadingUDPServer, socketserver.ThreadingTCPServer),
+                     ("fd42:4242:71::1", UDP6, TCP6)]
+        if state.get("physical_client"):
+            listeners.append((state["uplink_ip"], socketserver.ThreadingUDPServer, socketserver.ThreadingTCPServer))
+        for address, udp_type, tcp_type in listeners:
             for server_type, handler in ((udp_type, UDPHandler), (tcp_type, TCPHandler)):
                 server = server_type((address, 53), handler)
                 threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -246,6 +249,17 @@ def run_pilot(arguments):
         raise ValueError("Use a checked private address on the upstream gateway subnet")
     if str(uplink.ip) in (arguments.primary, arguments.backup):
         raise ValueError("Pilot address must not be a gateway address")
+    if arguments.external_control:
+        if not arguments.automatic or not arguments.physical_client or not arguments.physical_mac:
+            raise ValueError("External control requires automatic mode and an explicit physical client IP/MAC")
+        if ipaddress.IPv4Address(arguments.physical_client) not in uplink.network:
+            raise ValueError("Physical client must be on the upstream LAN")
+        if arguments.physical_client in (str(uplink.ip), arguments.primary, arguments.backup):
+            raise ValueError("Physical client cannot be a gateway or pilot uplink address")
+        if not re.fullmatch(r"(?:[0-9a-f]{2}:){5}[0-9a-f]{2}", arguments.physical_mac):
+            raise ValueError("Physical MAC must be six lowercase colon-separated octets")
+    elif arguments.physical_client or arguments.physical_mac:
+        raise ValueError("Physical clients require bounded external control")
     script = str(Path(__file__).resolve())
     prefix = f"f4g-pilot-{os.getpid()}"
     gateway, client = prefix + "-gw", prefix + "-client"
@@ -279,6 +293,8 @@ def run_pilot(arguments):
             raise ValueError("Pilot address is already assigned to the host")
         state = {"primary": arguments.primary, "backup": arguments.backup, "phase": "primary",
                  "uplink_ip": str(uplink.ip)}
+        if arguments.physical_client:
+            state["physical_client"] = arguments.physical_client
         state_file.write_text(json.dumps(state))
         decision = PilotDecision(time.monotonic())
         faults = set()
@@ -316,6 +332,9 @@ def run_pilot(arguments):
             if "primary" in faults:
                 inside(gateway, "nft", "add", "rule", "inet", "pilot", "fault_forward",
                        "iifname", "lan0", "meta", "nfproto", "ipv6", "counter", "reject")
+                if arguments.physical_client:
+                    inside(gateway, "nft", "add", "rule", "inet", "pilot", "fault_forward",
+                           "meta", "mark", "0x73", "meta", "nfproto", "ipv6", "counter", "reject")
             if decision.phase in faults:
                 inside(gateway, "ip", "route", "replace", "unreachable", "default")
             else:
@@ -368,17 +387,53 @@ def run_pilot(arguments):
         def check_dns():
             inside(client, "python3", script, "--worker", "dns-check", "--state", str(state_file), timeout=40)
 
+        def serve_external():
+            control = Path(arguments.external_control).resolve()
+            if control.parent != Path('/run') or not control.name.startswith('failsafe4g-physical-'):
+                raise ValueError("External control must use its own /run/failsafe4g-physical-* directory")
+            control.mkdir(mode=0o700)
+            addresses = json.loads(inside(gateway, "ip", "-j", "-6", "addr", "show", "dev", "wan0"))
+            link_local = next(address["local"] for interface in addresses for address in interface["addr_info"]
+                              if address["scope"] == "link")
+            last_id = 0
+            deadline = time.monotonic() + 300
+            while time.monotonic() < deadline:
+                request_path = control / 'command.json'
+                if request_path.exists():
+                    request = json.loads(request_path.read_text())
+                    if request['id'] > last_id:
+                        if request['action'] == 'fault' and request['path'] in ('primary', 'backup') and isinstance(request['enabled'], bool):
+                            inject_fault(request['path'], request['enabled'])
+                        elif request['action'] == 'stop':
+                            passed.append('externally controlled physical-client pilot stopped for cleanup')
+                            return
+                        else:
+                            raise ValueError('Invalid external pilot command')
+                        last_id = request['id']
+                health = automatic_step()
+                status = {'ready': True, 'phase': decision.phase, 'reason': decision.reason,
+                          'health': health, 'faults': sorted(faults), 'acknowledged_id': last_id,
+                          'ipv6_gateway': link_local, 'gateway': str(uplink.ip),
+                          'namespace': gateway, 'transitions': transitions}
+                temporary = control / 'status.new'
+                temporary.write_text(json.dumps(status))
+                temporary.replace(control / 'status.json')
+            raise RuntimeError('External pilot reached its five-minute lifetime limit')
+
         try:
             for namespace in (gateway, client):
                 command("ip", "netns", "add", namespace)
                 created.append(namespace)
                 inside(namespace, "ip", "link", "set", "lo", "up")
             command("ip", "link", "add", "link", arguments.interface, "name", "f4gpwan",
-                    "netns", gateway, "type", "ipvlan", "mode", "l2")
+                    "netns", gateway, "type", "macvlan" if arguments.physical_client else "ipvlan",
+                    "mode", "bridge" if arguments.physical_client else "l2")
             inside(gateway, "ip", "link", "set", "f4gpwan", "name", "wan0")
             inside(gateway, "ip", "link", "set", "wan0", "addrgenmode", "random")
             inside(gateway, "sysctl", "-qw", "net.ipv4.ip_forward=1",
                    "net.ipv6.conf.all.forwarding=1", "net.ipv6.conf.wan0.accept_ra=2")
+            if arguments.physical_client:
+                inside(gateway, "sysctl", "-qw", "net.ipv4.conf.all.send_redirects=0", "net.ipv4.conf.wan0.send_redirects=0")
             inside(gateway, "ip", "link", "set", "wan0", "up")
             inside(gateway, "python3", script, "--worker", "address-check", "--state", str(state_file))
             inside(gateway, "ip", "addr", "add", str(uplink), "dev", "wan0")
@@ -425,6 +480,10 @@ def run_pilot(arguments):
             for protocol in ("udp", "tcp"):
                 inside(gateway, "nft", "add", "rule", "inet", "pilot", "input",
                        "iifname", "lan0", protocol, "dport", "53", "accept")
+                if arguments.physical_client:
+                    inside(gateway, "nft", "add", "rule", "inet", "pilot", "input",
+                           "iifname", "wan0", "ip", "saddr", arguments.physical_client,
+                           protocol, "dport", "53", "counter", "accept")
             inside(gateway, "nft", "add", "chain", "inet", "pilot", "forward",
                    '{ type filter hook forward priority filter; policy drop; }')
             inside(gateway, "nft", "add", "rule", "inet", "pilot", "forward",
@@ -444,101 +503,126 @@ def run_pilot(arguments):
                        "iifname", "lan0", "ip6", "daddr", network, "counter", "reject")
             inside(gateway, "nft", "add", "rule", "inet", "pilot", "forward",
                    "iifname", "lan0", "oifname", "wan0", "accept")
+            if arguments.physical_client:
+                inside(gateway, "nft", "add", "chain", "inet", "pilot", "physical_mark",
+                       '{ type filter hook prerouting priority mangle; policy accept; }')
+                inside(gateway, "nft", "add", "rule", "inet", "pilot", "physical_mark",
+                       "iifname", "wan0", "ether", "saddr", arguments.physical_mac,
+                       "ip", "saddr", arguments.physical_client, "meta", "mark", "set", "0x73")
+                inside(gateway, "nft", "add", "rule", "inet", "pilot", "physical_mark",
+                       "iifname", "wan0", "ether", "saddr", arguments.physical_mac,
+                       "ip6", "saddr", "2000::/3", "meta", "mark", "set", "0x73")
+                inside(gateway, "nft", "add", "rule", "inet", "pilot", "forward",
+                       "iifname", "wan0", "oifname", "wan0", "meta", "mark", "0x73", "counter", "accept")
+                inside(gateway, "nft", "add", "chain", "inet", "pilot", "suppress_redirect",
+                       '{ type filter hook output priority filter; policy accept; }')
+                inside(gateway, "nft", "add", "rule", "inet", "pilot", "suppress_redirect",
+                       "oifname", "wan0", "icmpv6", "type", "nd-redirect", "drop")
             for family, network in (("ip", "10.231.71.0/24"), ("ip6", "fd42:4242:71::/64")):
                 inside(gateway, "nft", "add", "table", family, "pilot_nat")
                 inside(gateway, "nft", "add", "chain", family, "pilot_nat", "postrouting",
                        '{ type nat hook postrouting priority srcnat; policy accept; }')
                 inside(gateway, "nft", "add", "rule", family, "pilot_nat", "postrouting",
                        "oifname", "wan0", family, "saddr", network, "masquerade")
+                if arguments.physical_client:
+                    inside(gateway, "nft", "add", "rule", family, "pilot_nat", "postrouting",
+                           "oifname", "wan0", "meta", "mark", "0x73", "masquerade")
             resolver.mkdir(mode=0o700, parents=True)
             resolver.joinpath("resolv.conf").write_text("nameserver 10.231.71.1\noptions timeout:3 attempts:2\n")
             spawn("dns")
             spawn("advertise")
-            set_phase("primary")
-            inside(client, "python3", script, "--worker", "isolation-check", "--state", str(state_file))
-            rules = json.loads(inside(gateway, "nft", "-j", "list", "chain", "inet", "pilot", "forward"))
-            rejected = sum(expression.get("counter", {}).get("packets", 0)
-                           for entry in rules["nftables"] for expression in entry.get("rule", {}).get("expr", []))
-            if not rejected:
-                raise RuntimeError("Household isolation reject rule was not exercised")
-            passed.append("pilot client household-management access rejected by counted firewall rule")
-            check_dns()
-            primary4, primary6 = probe("-4"), probe("-6")
-            passed.append("separate pilot client: UDP/TCP DNS over IPv4/IPv6 and verified HTTPS through fibre over both families")
-            if arguments.automatic:
-                for sample in range(3):
-                    health = automatic_step()
-                    if not all(health[path]["healthy"] for path in ("primary", "backup")):
-                        raise RuntimeError("Both paths must pass warm-up probes before fault injection")
-                inject_fault("primary", True)
-                for sample in range(2):
-                    health = automatic_step()
-                    if health["primary"]["healthy"] or decision.phase != "primary":
-                        raise RuntimeError("Transient primary failure was not correctly debounced")
-                inject_fault("primary", False)
-                automatic_step()
-                passed.append("two failed primary samples do not trigger takeover; a healthy sample resets the failure streak")
-                inject_fault("backup", True)
-                health = automatic_step()
-                if health["backup"]["healthy"] or not health["primary"]["healthy"]:
-                    raise RuntimeError("Backup failure injection did not remain path-specific")
-                inject_fault("primary", True)
-                for sample in range(3):
-                    health = automatic_step()
-                    if health["primary"]["healthy"] or health["backup"]["healthy"] or decision.phase != "primary":
-                        raise RuntimeError("Unavailable backup must not be selected during primary failure")
-                passed.append("a failed cellular path prevents takeover even after sustained primary failure")
-                inject_fault("backup", False)
-                wait_automatic("backup")
-                passed.append("automatic takeover requires sustained pinned-primary failure and verified cellular readiness")
-            else:
-                set_phase("backup")
-            check_dns()
-            backup4 = probe("-4")
-            if backup4["ip"] == primary4["ip"]:
-                raise RuntimeError("Backup egress did not differ from primary")
-            failed6 = subprocess.run(["ip", "netns", "exec", client, "curl", "--noproxy", "*", "-6",
-                                      "--silent", "--max-time", "5", "https://www.cloudflare.com/cdn-cgi/trace"],
-                                     capture_output=True, timeout=8)
-            if failed6.returncode == 0:
-                raise RuntimeError("IPv6 unexpectedly remained reachable on IPv4-only backup")
-            inside(client, "ping", "-6", "-c", "1", "-W", "2", "fd42:4242:71::1")
-            passed.append("pilot-only backup: different cellular IPv4 egress, reachable DNS, IPv6 default withdrawn, local IPv6 retained")
-            automatic = probe()
-            if automatic["ip"] != backup4["ip"]:
-                raise RuntimeError("Backup route changed unexpectedly")
-            if arguments.automatic:
-                inject_fault("backup", True)
-                for sample in range(3):
-                    health = automatic_step()
-                    if health["primary"]["healthy"] or health["backup"]["healthy"] or decision.phase != "backup":
-                        raise RuntimeError("Both-path failure must not bounce to the known-broken primary")
-                inject_fault("backup", False)
-                for sample in range(2):
-                    automatic_step()
-                passed.append("both-path failure holds state without oscillation; cellular health recovers independently")
-                inject_fault("primary", False)
-                for sample in range(2):
-                    health = automatic_step()
-                    if not health["primary"]["healthy"] or decision.phase != "backup":
-                        raise RuntimeError("Primary recovery was not correctly debounced")
-                inject_fault("primary", True)
-                automatic_step()
-                if decision.phase != "backup":
-                    raise RuntimeError("A flapping primary caused premature recovery")
-                passed.append("brief primary recovery followed by failure does not leave cellular")
-                inject_fault("primary", False)
-                wait_automatic("primary")
+            if arguments.external_control:
+                set_phase("primary")
+                check_dns()
+                probe("-4")
+                probe("-6")
+                serve_external()
             else:
                 set_phase("primary")
-            check_dns()
-            restored4, restored6 = probe("-4"), probe("-6")
-            if restored4["ip"] != primary4["ip"] or restored6["ip"] != primary6["ip"]:
-                raise RuntimeError("Primary egress was not restored")
-            passed.append("primary IPv4/IPv6 gateway and DNS restored for pilot client")
-            for process in processes:
-                if process.poll() is not None:
-                    raise RuntimeError("Pilot worker exited early")
+                inside(client, "python3", script, "--worker", "isolation-check", "--state", str(state_file))
+                rules = json.loads(inside(gateway, "nft", "-j", "list", "chain", "inet", "pilot", "forward"))
+                rejected = sum(expression.get("counter", {}).get("packets", 0)
+                               for entry in rules["nftables"] for expression in entry.get("rule", {}).get("expr", []))
+                if not rejected:
+                    raise RuntimeError("Household isolation reject rule was not exercised")
+                passed.append("pilot client household-management access rejected by counted firewall rule")
+                check_dns()
+                primary4, primary6 = probe("-4"), probe("-6")
+                passed.append("separate pilot client: UDP/TCP DNS over IPv4/IPv6 and verified HTTPS through fibre over both families")
+                if arguments.automatic:
+                    for sample in range(3):
+                        health = automatic_step()
+                        if not all(health[path]["healthy"] for path in ("primary", "backup")):
+                            raise RuntimeError("Both paths must pass warm-up probes before fault injection")
+                    inject_fault("primary", True)
+                    for sample in range(2):
+                        health = automatic_step()
+                        if health["primary"]["healthy"] or decision.phase != "primary":
+                            raise RuntimeError("Transient primary failure was not correctly debounced")
+                    inject_fault("primary", False)
+                    automatic_step()
+                    passed.append("two failed primary samples do not trigger takeover; a healthy sample resets the failure streak")
+                    inject_fault("backup", True)
+                    health = automatic_step()
+                    if health["backup"]["healthy"] or not health["primary"]["healthy"]:
+                        raise RuntimeError("Backup failure injection did not remain path-specific")
+                    inject_fault("primary", True)
+                    for sample in range(3):
+                        health = automatic_step()
+                        if health["primary"]["healthy"] or health["backup"]["healthy"] or decision.phase != "primary":
+                            raise RuntimeError("Unavailable backup must not be selected during primary failure")
+                    passed.append("a failed cellular path prevents takeover even after sustained primary failure")
+                    inject_fault("backup", False)
+                    wait_automatic("backup")
+                    passed.append("automatic takeover requires sustained pinned-primary failure and verified cellular readiness")
+                else:
+                    set_phase("backup")
+                check_dns()
+                backup4 = probe("-4")
+                if backup4["ip"] == primary4["ip"]:
+                    raise RuntimeError("Backup egress did not differ from primary")
+                failed6 = subprocess.run(["ip", "netns", "exec", client, "curl", "--noproxy", "*", "-6",
+                                          "--silent", "--max-time", "5", "https://www.cloudflare.com/cdn-cgi/trace"],
+                                         capture_output=True, timeout=8)
+                if failed6.returncode == 0:
+                    raise RuntimeError("IPv6 unexpectedly remained reachable on IPv4-only backup")
+                inside(client, "ping", "-6", "-c", "1", "-W", "2", "fd42:4242:71::1")
+                passed.append("pilot-only backup: different cellular IPv4 egress, reachable DNS, IPv6 default withdrawn, local IPv6 retained")
+                automatic = probe()
+                if automatic["ip"] != backup4["ip"]:
+                    raise RuntimeError("Backup route changed unexpectedly")
+                if arguments.automatic:
+                    inject_fault("backup", True)
+                    for sample in range(3):
+                        health = automatic_step()
+                        if health["primary"]["healthy"] or health["backup"]["healthy"] or decision.phase != "backup":
+                            raise RuntimeError("Both-path failure must not bounce to the known-broken primary")
+                    inject_fault("backup", False)
+                    for sample in range(2):
+                        automatic_step()
+                    passed.append("both-path failure holds state without oscillation; cellular health recovers independently")
+                    inject_fault("primary", False)
+                    for sample in range(2):
+                        health = automatic_step()
+                        if not health["primary"]["healthy"] or decision.phase != "backup":
+                            raise RuntimeError("Primary recovery was not correctly debounced")
+                    inject_fault("primary", True)
+                    automatic_step()
+                    if decision.phase != "backup":
+                        raise RuntimeError("A flapping primary caused premature recovery")
+                    passed.append("brief primary recovery followed by failure does not leave cellular")
+                    inject_fault("primary", False)
+                    wait_automatic("primary")
+                else:
+                    set_phase("primary")
+                check_dns()
+                restored4, restored6 = probe("-4"), probe("-6")
+                if restored4["ip"] != primary4["ip"] or restored6["ip"] != primary6["ip"]:
+                    raise RuntimeError("Primary egress was not restored")
+                passed.append("primary IPv4/IPv6 gateway and DNS restored for pilot client")
+                for process in processes:
+                    if process.poll() is not None:
+                        raise RuntimeError("Pilot worker exited early")
         finally:
             for process in processes:
                 if process.poll() is None:
@@ -571,6 +655,9 @@ if __name__ == "__main__":
     parser.add_argument("--backup", default="192.168.1.253")
     parser.add_argument("--uplink-address", help="Required: checked unused address outside DHCP pool, with prefix")
     parser.add_argument("--automatic", action="store_true", help="Exercise automatic detection with pilot-only injected faults")
+    parser.add_argument("--external-control", help="Private /run control directory for a bounded physical-client test")
+    parser.add_argument("--physical-client", help="Explicit single-client IPv4 address; requires external control")
+    parser.add_argument("--physical-mac", help="Explicit single-client Ethernet MAC; requires external control")
     settings = parser.parse_args()
     if settings.run:
         if not settings.uplink_address:

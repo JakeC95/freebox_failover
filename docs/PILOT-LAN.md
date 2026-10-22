@@ -149,4 +149,7 @@ changes are applied before publishing the new DNS/RA phase, and an exited pilot
 worker aborts automatic monitoring rather than continuing with missing services.
 This is still an opt-in pilot, not an installed
 automatic household gateway. IPv6-only upstream failure detection, actual client
-OS behaviour, physical-link outages and real-device acceptance tests remain open.
+OS RA behaviour and physical-link outages remain open. A subsequent
+[real Windows client data-path acceptance](WINDOWS-ACCEPTANCE.md) passes using
+temporary routes, restricted test-domain DNS and a proved local rollback guard;
+it does not claim Windows RA/RDNSS acceptance on an isolated physical LAN.
