@@ -1,5 +1,9 @@
 # Operations — Freebox Ultra
 
+Household activation requires the separate [rollout approval gates](docs/ROLLOUT-PLAN.md).
+The read-only `tools/rollout_preflight.py` checks preparation safety, not production
+readiness; a passing report never enables takeover or authorizes network changes.
+
 ## Inspect the running service
 
 ```sh

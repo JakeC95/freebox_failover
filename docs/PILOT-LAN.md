@@ -148,11 +148,43 @@ routes, rules, firewall and forwarding matching the original snapshot. Route
 changes are applied before publishing the new DNS/RA phase, and an exited pilot
 worker aborts automatic monitoring rather than continuing with missing services.
 This is still an opt-in pilot, not an installed
-automatic household gateway. IPv6-only upstream failure detection, other client
-OS RA behaviour and physical-link outages remain open. A subsequent
+automatic household gateway. Other client OS RA behaviour and physical-link
+outages remain open. A subsequent
 [real Windows client data-path acceptance](WINDOWS-ACCEPTANCE.md) passes using
 temporary routes, restricted test-domain DNS and a proved local rollback guard;
 it does not claim Windows RA/RDNSS acceptance on an isolated physical LAN.
 The later [targeted Windows router-discovery probe](WINDOWS-ROUTER-DISCOVERY.md)
 also passes actual SLAAC, RDNSS and router lifetime processing using client-only
 unicasts and wire capture, still without approving household-wide RA deployment.
+
+## Independent IPv6 degradation handling
+
+The automatic namespace scenario now also tests an IPv6-only primary failure.
+An independently marked IPv6 TLS probe uses table `7176` through the native
+Freebox link-local gateway, so withdrawing the pilot client's IPv6 default or
+selecting cellular cannot mask whether native IPv6 has recovered. It tries two
+Cloudflare IPv6 addresses with certificate-verified HTTPS, not two independent
+providers and not a separate IPv6 DNS test.
+
+Three failed observations withdraw only the private veth client's IPv6 default;
+working fibre IPv4 stays on fibre, IPv4/IPv6 local DNS remains reachable, local
+IPv6 ping works and unforced HTTPS falls back to fibre IPv4. Two failures alone
+do not withdraw the default. Recovery requires three consecutive healthy native
+IPv6 samples; unknown observations break the streak rather than pretending to
+be successful. No IPv4/cellular transition occurs during this scenario.
+
+The expanded live run passed all twelve check groups in 159.2 seconds, including
+the existing cellular outage/recovery scenarios, exactly two IPv4 path
+transitions, and full host network restoration. This adds no production service,
+multicast household RAs or interlock bypass. External status now reports the
+effective debounced `ipv6_available` verdict separately from raw probe health.
+See the [rollout gates](ROLLOUT-PLAN.md) before interpreting pilot success as
+household readiness.
+
+Additional validation deliberately terminated the pilot with SIGTERM while its
+IPv6 default was withdrawn. All host IPv4/IPv6 routes and rules, firewall and
+forwarding matched the prior snapshot after cleanup; no pilot namespaces
+remained and the monitor stayed active. Fifty thousand seeded family-health
+observations produced 1,251 transitions, each meeting its three-sample guard.
+The updated pilot also passed a repeat of the same selected Windows client's
+complete SLAAC/RDNSS/router-lifetime and local SYSTEM rollback acceptance run.

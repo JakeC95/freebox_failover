@@ -175,3 +175,9 @@ or claiming a Windows isolated-LAN RA test. A further
 real SLAAC, RDNSS, default installation/withdrawal and expiry, with wire evidence
 that only the selected client received the probe RAs. Final household topology,
 other clients and production behaviour remain gated separately.
+
+Preparation now includes a separate pinned native IPv6 health path and an
+IPv6-only fault/recovery scenario in the namespace pilot. This deliberately
+does not change the installed IPv4-only takeover service. The
+[rollout plan and read-only preflight](ROLLOUT-PLAN.md) track remaining topology,
+performance, client and independent-rollback gates without authorizing rollout.

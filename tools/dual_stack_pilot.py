@@ -55,6 +55,22 @@ class PilotDecision:
         return desired
 
 
+class PilotFamilyHealth:
+    def __init__(self):
+        self.available = True
+        self.successes = 0
+        self.failures = 0
+
+    def update(self, healthy):
+        self.successes = self.successes + 1 if healthy is True else 0
+        self.failures = self.failures + 1 if healthy is False else 0
+        if self.failures >= 3:
+            self.available = False
+        elif self.successes >= 3:
+            self.available = True
+        return self.available
+
+
 def command(*arguments, timeout=45, required=True):
     result = subprocess.run(arguments, text=True, capture_output=True, timeout=timeout)
     if required and result.returncode:
@@ -130,7 +146,7 @@ def worker(action, state_path):
             state = json.loads(state_file.read_text())
             sendp(Ether(dst="33:33:00:00:00:01") /
                   IPv6(src="fe80::1", dst="ff02::1", hlim=255) /
-                  ICMPv6ND_RA(routerlifetime=30 if state["phase"] == "primary" else 0) /
+                  ICMPv6ND_RA(routerlifetime=30 if state["phase"] == "primary" and state.get("ipv6_available", True) else 0) /
                   ICMPv6NDOptSrcLLAddr(lladdr=get_if_hwaddr("lan0")) /
                   ICMPv6NDOptPrefixInfo(prefix="fd42:4242:71::", prefixlen=64,
                                        validlifetime=3600, preferredlifetime=1800) /
@@ -178,10 +194,35 @@ def worker(action, state_path):
             return {"healthy": bool(dns_ok and https_ok), "dns": bool(dns_ok),
                     "https": https_ok, "seconds": round(time.monotonic() - started, 2)}
 
-        with ThreadPoolExecutor(max_workers=2) as executor:
+        def ipv6_health():
+            started = time.monotonic()
+            context = ssl.create_default_context()
+            for destination in ("2606:4700:4700::1111", "2606:4700:4700::1001"):
+                try:
+                    with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as connection:
+                        connection.setsockopt(socket.SOL_SOCKET, socket.SO_MARK, 0x76)
+                        connection.settimeout(2)
+                        connection.connect((destination, 443))
+                        with context.wrap_socket(connection, server_hostname="one.one.one.one") as secure:
+                            secure.sendall(b"GET /cdn-cgi/trace HTTP/1.0\r\nHost: one.one.one.one\r\n\r\n")
+                            response = bytearray()
+                            while b"\r\n\r\n" not in response and len(response) < 8192:
+                                chunk = secure.recv(1024)
+                                if not chunk:
+                                    break
+                                response.extend(chunk)
+                            if bytes(response).split(b"\r\n", 1)[0] in (b"HTTP/1.0 200 OK", b"HTTP/1.1 200 OK"):
+                                return {"healthy": True, "https": True, "seconds": round(time.monotonic() - started, 2)}
+                except (OSError, ssl.SSLError):
+                    pass
+            return {"healthy": False, "https": False, "seconds": round(time.monotonic() - started, 2)}
+
+        with ThreadPoolExecutor(max_workers=3) as executor:
             primary = executor.submit(path_health, "primary", 0x71)
             backup = executor.submit(path_health, "backup", 0x72)
-            print(json.dumps({"primary": primary.result(), "backup": backup.result()}))
+            primary6 = executor.submit(ipv6_health)
+            print(json.dumps({"primary": primary.result(), "backup": backup.result(),
+                              "primary_ipv6": primary6.result()}))
     elif action == "unicast-ra":
         addresses = json.loads(command('ip', '-j', '-6', 'addr', 'show', 'dev', 'wan0'))
         source = next(address['local'] for interface in addresses for address in interface['addr_info'] if address['scope'] == 'link')
@@ -355,7 +396,23 @@ def run_pilot(arguments):
                          unicast_ra_prefix=arguments.unicast_ra_prefix)
         state_file.write_text(json.dumps(state))
         decision = PilotDecision(time.monotonic())
+        family_health = PilotFamilyHealth()
         faults = set()
+
+        def update_ipv6_route(phase, available):
+            if phase == "primary" and available:
+                inside(gateway, "ip", "-6", "route", "del", "unreachable", "default", "metric", "1", required=False)
+            else:
+                inside(gateway, "ip", "-6", "route", "replace", "unreachable", "default", "metric", "1")
+
+        def wait_ipv6_default(available):
+            deadline = time.monotonic() + 12
+            while time.monotonic() < deadline:
+                routes = json.loads(inside(client, "ip", "-j", "-6", "route", "show", "default"))
+                if bool(routes) == available:
+                    return
+                time.sleep(0.25)
+            raise RuntimeError("Pilot client RA transition timed out")
 
         def set_phase(phase):
             print(f"Pilot phase: {phase}", file=sys.stderr, flush=True)
@@ -363,19 +420,11 @@ def run_pilot(arguments):
             current["phase"] = phase
             temporary = state_file.with_suffix(".new")
             inside(gateway, "ip", "route", "replace", "default", "via", current[phase], "dev", "wan0")
-            if phase == "backup":
-                inside(gateway, "ip", "-6", "route", "add", "unreachable", "default", "metric", "1")
-            else:
-                inside(gateway, "ip", "-6", "route", "del", "unreachable", "default", "metric", "1", required=False)
+            available = phase == "primary" and current.get("ipv6_available", True)
+            update_ipv6_route(phase, available)
             temporary.write_text(json.dumps(current))
             temporary.replace(state_file)
-            deadline = time.monotonic() + 12
-            while time.monotonic() < deadline:
-                routes = json.loads(inside(client, "ip", "-j", "-6", "route", "show", "default"))
-                if bool(routes) == (phase == "primary"):
-                    return
-                time.sleep(0.25)
-            raise RuntimeError("Pilot client RA transition timed out")
+            wait_ipv6_default(available)
 
         def inject_fault(name, enabled):
             if enabled:
@@ -385,9 +434,11 @@ def run_pilot(arguments):
             inside(gateway, "nft", "flush", "chain", "inet", "pilot", "fault_output")
             inside(gateway, "nft", "flush", "chain", "inet", "pilot", "fault_forward")
             for path in sorted(faults):
-                inside(gateway, "nft", "add", "rule", "inet", "pilot", "fault_output",
-                       "meta", "mark", "0x71" if path == "primary" else "0x72", "counter", "reject")
-            if "primary" in faults:
+                marks = {"primary": ("0x71", "0x76"), "backup": ("0x72",), "primary_ipv6": ("0x76",)}[path]
+                for mark in marks:
+                    inside(gateway, "nft", "add", "rule", "inet", "pilot", "fault_output",
+                           "meta", "mark", mark, "counter", "reject")
+            if faults.intersection(("primary", "primary_ipv6")):
                 inside(gateway, "nft", "add", "rule", "inet", "pilot", "fault_forward",
                        "iifname", "lan0", "meta", "nfproto", "ipv6", "counter", "reject")
                 if arguments.physical_client:
@@ -404,6 +455,15 @@ def run_pilot(arguments):
                 raise RuntimeError("Pilot worker exited during automatic monitoring")
             health = json.loads(inside(gateway, "python3", script, "--worker", "health",
                                        "--state", str(state_file), timeout=25))
+            available = family_health.update(health["primary_ipv6"]["healthy"])
+            current = json.loads(state_file.read_text())
+            if available != current.get("ipv6_available", True):
+                current["ipv6_available"] = available
+                update_ipv6_route(decision.phase, available)
+                temporary = state_file.with_suffix(".new")
+                temporary.write_text(json.dumps(current))
+                temporary.replace(state_file)
+                wait_ipv6_default(decision.phase == "primary" and available)
             previous = decision.phase
             desired = decision.update(health["primary"]["healthy"], health["backup"]["healthy"], time.monotonic())
             print(json.dumps({"health": health, "phase": desired, "reason": decision.reason}), file=sys.stderr, flush=True)
@@ -473,7 +533,7 @@ def run_pilot(arguments):
                 if request_path.exists():
                     request = json.loads(request_path.read_text())
                     if request['id'] > last_id:
-                        if request['action'] == 'fault' and request['path'] in ('primary', 'backup') and isinstance(request['enabled'], bool):
+                        if request['action'] == 'fault' and request['path'] in ('primary', 'backup', 'primary_ipv6') and isinstance(request['enabled'], bool):
                             inject_fault(request['path'], request['enabled'])
                         elif request['action'] == 'unicast_ra':
                             last_ra = unicast_ra(request['router_lifetime'], request['dns_lifetime'], request.get('retire_prefix', False), request.get('preference', 3))
@@ -486,6 +546,7 @@ def run_pilot(arguments):
                 health = automatic_step()
                 status = {'ready': True, 'phase': decision.phase, 'reason': decision.reason,
                           'health': health, 'faults': sorted(faults), 'acknowledged_id': last_id,
+                          'ipv6_available': decision.phase == 'primary' and family_health.available,
                           'ipv6_gateway': link_local, 'gateway': str(uplink.ip),
                           'namespace': gateway, 'transitions': transitions, 'unicast_ra': last_ra,
                           'gateway_mac': gateway_mac}
@@ -529,6 +590,11 @@ def run_pilot(arguments):
                 time.sleep(0.5)
             else:
                 raise RuntimeError("No upstream native IPv6 RA route; leaving household settings unchanged")
+            if arguments.automatic:
+                native_routes = json.loads(inside(gateway, "ip", "-j", "-6", "route", "show", "default"))
+                native_gateway = next(route["gateway"] for route in native_routes if route.get("dev") == "wan0" and "gateway" in route)
+                inside(gateway, "ip", "-6", "route", "add", "table", "7176", "default", "via", native_gateway, "dev", "wan0")
+                inside(gateway, "ip", "-6", "rule", "add", "priority", "7176", "fwmark", "0x76", "lookup", "7176")
             inside(gateway, "ip", "link", "add", "lan0", "type", "veth", "peer", "name", "peer0")
             inside(gateway, "ip", "link", "set", "peer0", "netns", client)
             inside(client, "ip", "link", "set", "peer0", "name", "eth0")
@@ -633,8 +699,30 @@ def run_pilot(arguments):
                 if arguments.automatic:
                     for sample in range(3):
                         health = automatic_step()
-                        if not all(health[path]["healthy"] for path in ("primary", "backup")):
+                        if not all(health[path]["healthy"] for path in ("primary", "backup", "primary_ipv6")):
                             raise RuntimeError("Both paths must pass warm-up probes before fault injection")
+                    inject_fault("primary_ipv6", True)
+                    for sample in range(2):
+                        health = automatic_step()
+                        if health["primary_ipv6"]["healthy"] or not family_health.available or decision.phase != "primary":
+                            raise RuntimeError("Transient IPv6 failure was not independently debounced")
+                    automatic_step()
+                    if family_health.available or decision.phase != "primary" or transitions:
+                        raise RuntimeError("IPv6-only outage must not switch working IPv4 to cellular")
+                    check_dns()
+                    if probe("-4")["ip"] != primary4["ip"] or probe()["ip"] != primary4["ip"]:
+                        raise RuntimeError("IPv6-only outage lost primary IPv4/family fallback")
+                    inside(client, "ping", "-6", "-c", "1", "-W", "2", "fd42:4242:71::1")
+                    passed.append("IPv6-only failure withdraws pilot IPv6 default after debounce; fibre IPv4, DNS and local IPv6 remain usable without cellular takeover")
+                    inject_fault("primary_ipv6", False)
+                    for sample in range(2):
+                        automatic_step()
+                        if family_health.available:
+                            raise RuntimeError("IPv6 recovery was not independently debounced")
+                    automatic_step()
+                    if not family_health.available or probe("-6")["ip"] != primary6["ip"] or transitions:
+                        raise RuntimeError("Pinned native IPv6 health failed to restore pilot routing")
+                    passed.append("IPv6 recovery is detected through a pinned native route while client default is withdrawn and restores only after three healthy samples")
                     inject_fault("primary", True)
                     for sample in range(2):
                         health = automatic_step()
