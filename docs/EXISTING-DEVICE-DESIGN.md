@@ -6,8 +6,9 @@
   cellular router where possible, not an additional always-on gateway.
 - The Windows computer remains a temporary test client, not infrastructure.
 - Preserve the two working bridged APs, their roaming and unmanaged PoE switch.
-- No purchase, rewiring, household activation or IPv6 shutdown is authorized by
-  preparation work. Ask before any household-impacting step.
+- Preparation alone never authorizes household changes. The owner has approved
+  this maintenance window; the Ethernet service is armed, with no AP, DHCP,
+  IPv6-advertisement or wiring changes.
 
 The separately routed gateway/LAN candidate is therefore not the active rollout
 plan. Its exploration and benchmark are retained as evidence, not as a hardware
@@ -24,13 +25,26 @@ or required to participate in the failover decision.
 The existing Ethernet service already implements opt-in IPv4 gateway ARP
 takeover with marked routing to the cellular router, DNS redirection, health
 guards and restoration. Keeping that mechanism failover-only avoids making VM
-throughput or its USB storage a normal fibre-path bottleneck. It remains
-monitor-only because that IPv4 mechanism does not solve IPv6 control.
+throughput or its USB storage a normal fibre-path bottleneck. The installed
+service is armed but currently idle on fibre; the physical fibre-outage and
+whole-household LTE path remain untested.
 
-This describes the desired separation, **not a fully validated dual-stack
-production design**. Do not arm it by changing the interlock acknowledgement.
+This describes the intended separation, **not a fully validated dual-stack
+production design**. Do not disable LAN IPv6 to bypass the interlock.
 
-## IPv6 remains a real gate
+## Explicit best-effort IPv6 policy
+
+The owner accepts IPv4-only backup as a practical fallback, rather than requiring
+perfect IPv6 continuity. Selected Android tests with the deployment SIM passed
+application use and native IPv6 restoration without reconnecting Wi-Fi. This
+does not establish compatibility for every application: selected Windows .NET
+transports have failed deadlines under silent IPv6 loss.
+
+The candidate source provides an explicit `ipv6_policy=best_effort` option with
+`accept_ipv6_limitations=true`. It does not disable IPv6, provide IPv6 takeover,
+or guarantee application fallback. Defaults retain `require_disabled`; the
+installed service explicitly uses the acknowledged `best_effort` policy. See the
+[production qualification notes](PRODUCTION-QUALIFICATION.md) before deployment.
 
 Clients currently learn the Freebox's link-local IPv6 default router. With the
 tested IPv4-only SIM, merely redirecting IPv4 cannot make their existing IPv6
@@ -55,9 +69,10 @@ quietly disable IPv6 across clients to satisfy the existing daemon's interlock.
 No changes to Freebox prefix delegation, IPv6 enablement/firewall, DHCP, APs or
 household advertisements were made by this evaluation.
 
-The next [selected-client application fallback test](APPLICATION-FALLBACK.md)
-explicitly distinguishes silent IPv6 loss from immediate rejection and checks
-multiple Windows HTTP stacks. Compatibility results do not remove this gate.
+The completed [selected-client application fallback test](APPLICATION-FALLBACK.md)
+distinguishes silent IPv6 loss from immediate rejection across multiple Windows
+HTTP stacks. Compatibility results bound the accepted best-effort policy; they
+do not prove complete IPv6 or IPv6-DNS failover.
 
 ## Fault coverage boundaries
 
@@ -68,8 +83,10 @@ The same switch/LAN topology may also depend on the Freebox remaining alive.
 Do not advertise power/Freebox-hardware failure protection without an independent
 path, power design and additional evidence.
 
-The production qualification still needs controller/VM restart and takeover
-recovery, end-to-end primary/cellular health, operator-specific DNS, IPv6 failure
-policy, representative clients and independent rollback. Normal fibre operation
-must not depend on the Windows test computer staying on. See
+The monitor-only service restart and process-crash recovery, selected-client
+production ARP/LTE/failback path, deployment-SIM DNS/HTTPS checks, and Android/TV
+application rehearsals have passed. Still unqualified are VM/Freebox/USB loss
+during active failover, full-household rollback, other household applications,
+and performance beyond the measured 1 GbE test path. Normal fibre operation must
+not depend on the Windows test computer staying on. See
 [rollout gates](ROLLOUT-PLAN.md) and [local benchmark](GATEWAY-BENCHMARK.md).

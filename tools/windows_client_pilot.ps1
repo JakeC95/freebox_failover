@@ -108,6 +108,12 @@ function Restore-OwnedChanges {
             Remove-NetRoute -Confirm:$false
     }
     Get-DnsClientNrptRule | Where-Object Comment -eq $taskName | Remove-DnsClientNrptRule -Force
+    $gateways = @($baseline.Configuration.Routes | Where-Object DestinationPrefix -eq '0.0.0.0/0' |
+        ForEach-Object NextHop | Where-Object { $_ -and $_ -ne '0.0.0.0' } | Select-Object -Unique)
+    foreach ($gateway in $gateways) {
+        Remove-NetNeighbor -InterfaceIndex $baseline.Configuration.InterfaceIndex -IPAddress $gateway `
+            -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
+    }
     if ($state.RAProbe) {
         Get-NetRoute -InterfaceIndex $baseline.Configuration.InterfaceIndex -DestinationPrefix '::/0' -PolicyStore ActiveStore -ErrorAction SilentlyContinue |
             Where-Object NextHop -eq $state.RAProbe.Gateway | Remove-NetRoute -Confirm:$false

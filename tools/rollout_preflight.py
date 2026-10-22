@@ -14,11 +14,11 @@ import sys
 
 
 REMAINING_GATES = (
-    "approved IPv4/IPv6 failover policy using the existing Freebox VM and cellular router",
-    "measured gateway throughput and an accepted gateway/VM failure policy",
-    "representative household client and application acceptance",
-    "independent production rollback rehearsed for the selected topology",
-    "fresh primary and cellular end-to-end acceptance with the deployment SIM",
+    "owner acceptance of best-effort IPv6 behavior and documented Windows application limitations",
+    "defined recovery and downtime policy for Freebox VM, host, or USB failure during LTE forwarding",
+    "independent rollback rehearsed for the full household topology, beyond selected-client guards",
+    "acceptance of measured single-client forwarding scope and any remaining household workloads",
+    "final exact-release and deployment-SIM end-to-end checks immediately before activation",
     "explicit user-approved maintenance window and permission to activate",
 )
 
@@ -30,7 +30,8 @@ def command(*arguments):
     return result.stdout.strip()
 
 
-def evaluate(config, status, service, disk_free, memory_available, namespaces, watchdog):
+def evaluate(config, status, service, disk_free, memory_available, namespaces, watchdog,
+             canary_runtime, canary_units):
     return {
         "takeover_disabled": config.getboolean("ethernet", "enabled", fallback=True) is False,
         "ipv6_interlock_not_bypassed": config.getboolean("ethernet", "lan_ipv6_disabled", fallback=True) is False,
@@ -41,6 +42,7 @@ def evaluate(config, status, service, disk_free, memory_available, namespaces, w
         "disk_headroom": disk_free >= 512 * 1024 * 1024,
         "memory_headroom": memory_available >= 128 * 1024 * 1024,
         "no_leftover_pilot_namespaces": not any(name.startswith(("f4g-pilot-", "f4g-bench-")) for name in namespaces),
+        "no_leftover_production_canaries": not canary_runtime and not canary_units,
         "systemd_watchdog_configured": watchdog.get("WatchdogUSec") not in (None, "", "0") and watchdog.get("Restart") == "on-failure",
     }
 
@@ -69,7 +71,11 @@ def main():
         available = int(memory["MemAvailable"].split()[0]) * 1024
         free = shutil.disk_usage(repository).free
         namespaces = [line.split()[0] for line in command("ip", "netns", "list").splitlines()]
-        report["checks"] = evaluate(config, status, service, free, available, namespaces, watchdog)
+        canary_runtime = list(Path("/run").glob("failsafe4g-prod-canary-*"))
+        timer_units = command("systemctl", "list-units", "--all", "--type=timer", "--no-legend")
+        canary_units = "failsafe4g-prod-canary-" in timer_units
+        report["checks"] = evaluate(config, status, service, free, available, namespaces,
+                                    watchdog, canary_runtime, canary_units)
         report["revision"] = command("git", "-C", str(repository), "rev-parse", "HEAD")
         report["checks"]["checkout_clean"] = not command("git", "-C", str(repository), "status", "--porcelain")
         backups = Path("/var/backups/freebox-failover")

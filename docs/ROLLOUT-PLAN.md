@@ -1,10 +1,18 @@
-# Household rollout: preparation and approval gates
+# Household rollout: safety checks and operation
 
-Household activation is **not authorized** by permission to prepare. Keep the
-installed Ethernet service monitor-only, keep its IPv6 safety interlock intact,
-and do not change Freebox DHCP, DNS, prefix delegation, advertisements or wiring
-until the owner has explicitly approved a maintenance window. Never interpret
-passing a pilot or the preflight below as permission to activate.
+Preparation alone never authorizes activation. The owner approved this
+maintenance window; the installed service is now armed with the acknowledged
+best-effort IPv6 policy. The preflight below is only for a disabled service and
+continues to report `rollout_authorized: false` by design. Never infer approval
+from a passing pilot or preflight. Do not change Freebox DHCP, DNS, prefix
+delegation, advertisements or wiring as part of IPv4 failover.
+
+The owner has subsequently accepted a best-effort IPv4 backup policy rather than
+complete IPv6 continuity. Candidate source offers an explicitly acknowledged
+policy, enabled in the installed service only after approval. The
+[production qualification notes](PRODUCTION-QUALIFICATION.md) supersede older
+requirements for universal application fallback, without removing representative
+client tests, truthful IPv6 limitations, or maintenance-window approval.
 
 ## Read-only preflight
 
@@ -17,7 +25,8 @@ sudo python3 /opt/freebox-failover/tools/rollout_preflight.py
 This checks disabled takeover, the unbypassed IPv6 interlock, a fresh monitor-only
 heartbeat, primary API state, configured service watchdog/restart policy,
 512 MiB disk and 128 MiB available-memory headroom, no leftover pilot namespaces,
-a clean checkout and an existing completed source/config installer backup.
+a clean checkout, no leftover production-canary runtime/timer state, and an
+existing completed source/config installer backup.
 Resource thresholds are preparation headroom, **not** a throughput guarantee.
 Backup presence is not proof that a production network rollback works.
 
@@ -62,8 +71,9 @@ bridged radios/roaming with unchanged configuration and private backups. Keep
 those APs untouched; do not assume switch VLAN isolation or move only Wi-Fi
 clients while forgetting devices connected directly to the Freebox.
 
-Before selecting it, measure forwarding on the actual VM path and establish
-what clients do if the VM, its USB storage or its host fails. A gateway that
+The selected 1 GbE client's local VM forwarding path has been measured, and the
+normal fibre path still bypasses the VM. Establish what clients do if the VM,
+its USB storage or its host fails during active LTE forwarding. A gateway that
 fails over the ISP but turns a VM outage into a household outage is not yet a
 failsafe design. Keep the 100 Mbps LTE router out of the normal fibre data path.
 Do not promise Ultra line-rate forwarding or automatic VM-failure bypass.
@@ -81,11 +91,11 @@ present that decision to the owner before implementing it.
 | IPv6-only primary failure | Independent pinned IPv6 probe and bounded namespace scenario | Require working fibre IPv4 to stay on fibre; withdraw only controlled IPv6 default |
 | IPv6 recovery | Three healthy pinned IPv6 samples restore pilot default | Recovery probe must work while client IPv6 default is withdrawn |
 | Windows SLAAC/RDNSS/router expiry | Selected-client unicast wire capture and SYSTEM rollback pass | Repeat on final segment; not proof of household RA coexistence |
-| Other client families/applications | Not established | Representative Apple/Android/Linux/IoT as applicable; calls/VPN/TV/local discovery |
-| Unusable IPv6 with working cellular IPv4 | [Windows application comparison](APPLICATION-FALLBACK.md) finds .NET deadline failures despite curl fallback | Do not release an IPv4-only takeover policy that merely assumes every app falls back |
-| VM/host/USB failure, reboot | Production topology not established | Independently verified recovery or explicitly accepted downtime |
-| Throughput, MTU/PMTUD and long-running stability | [Selected-client local IPv4 NAT benchmark](GATEWAY-BENCHMARK.md) passes on a 1 GbE client; other limits unqualified | Measure final path without silently accepting a fibre bottleneck |
-| Production rollback | Only pilot rollback and installer backup proven | Rehearse selected topology with an independent deadline guard |
+| Other client families/applications | Android and TV deployment-SIM rehearsals pass; selected Windows curl works but older .NET transports miss deadlines | Accept known app limitations; remaining clients/calls/VPN/local discovery remain unqualified |
+| Unusable IPv6 with working cellular IPv4 | Android applications pass; [Windows application comparison](APPLICATION-FALLBACK.md) finds .NET deadline failures despite curl fallback | Explicitly acknowledged best-effort policy; never promise universal fallback |
+| VM/host/USB failure, reboot | Monitor-only service restarts after SIGKILL; active-failover host loss untested | Define recovery/downtime expectations and exercise or explicitly accept host-loss behavior |
+| Throughput, MTU/PMTUD and long-running stability | [Selected-client local IPv4 NAT benchmark](GATEWAY-BENCHMARK.md) passes on a 1 GbE client; a bounded LTE load check passes; other limits unqualified | Confirm this scope is adequate; normal multi-gig fibre bypasses the VM, LTE is the constrained path |
+| Production rollback | Windows SYSTEM guard and VM timer recovery after selected-worker SIGKILL pass for one PC | Rehearse rollback for the full household topology; neither guard survives VM/Freebox/USB-host loss |
 
 IPv6 health currently verifies TLS to two addresses of one provider and does not
 claim multi-provider outage diagnosis or independent DNS-over-IPv6 validation.
@@ -94,7 +104,23 @@ samples restore it. Local prefix/DNS remain available. IPv4 path selection has
 its separate health/hysteresis. All fault rules and pinned route tables live in
 the pilot namespace, not the host or household gateway.
 
-## Final-window procedure, once all gates are satisfied
+## Rollback helper
+
+The root-only `tools/household_rollback.py` disables takeover, restarts the
+service, and refuses success unless monitor-only mode, the Freebox default
+route, and absence of failover policy routes and firewall state are verified.
+It passed a live rollback rehearsal from armed standby. To arm a five-minute
+automatic rollback before a future config change:
+
+```sh
+sudo systemd-run --unit=failsafe4g-rollout-guard.timer --on-active=5m \
+  /usr/bin/python3 /opt/freebox-failover/tools/household_rollback.py
+```
+
+Keep the timer until the service and representative clients pass the window's
+checks; stop it only after confirming the service is armed and healthy.
+
+## Final-window procedure
 
 1. Present the exact topology/config diff, tested release revision, expected
    disruptions, rollback trigger/deadline and any required physical actions.

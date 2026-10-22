@@ -75,7 +75,8 @@ def doctor(settings):
         token_error = error.code
     result = {"version": VERSION, "dependencies": dependencies,
               "interface_exists": interface, "token_error": token_error,
-              "blockers": settings.blockers(), "service": read_status()}
+              "blockers": settings.blockers(), "ipv6_policy": settings.ipv6_policy,
+              "limitations": settings.limitations(), "service": read_status()}
     if dependencies["ip"] and interface:
         result["addresses"] = json.loads(command("ip", "-j", "addr", "show", "dev", settings.interface).stdout)
         result["default_routes"] = json.loads(command("ip", "-j", "-4", "route", "show", "default").stdout)
@@ -116,6 +117,10 @@ class Settings:
             raise ValueError("Primary gateway must belong to lan_network")
         self.enabled = config.getboolean("ethernet", "enabled", fallback=False)
         self.ipv6_disabled = config.getboolean("ethernet", "lan_ipv6_disabled", fallback=False)
+        self.ipv6_policy = config.get("ethernet", "ipv6_policy", fallback="require_disabled").strip()
+        self.accept_ipv6_limitations = config.getboolean("ethernet", "accept_ipv6_limitations", fallback=False)
+        if self.ipv6_policy not in ("require_disabled", "best_effort"):
+            raise ValueError("ipv6_policy must be require_disabled or best_effort")
         self.dns = str(ipaddress.IPv4Address(config.get("ethernet", "dns", fallback="1.1.1.1")))
         self.probes = config.get("ethernet", "probe_hosts", fallback="1.1.1.1 9.9.9.9").split()
         if len(set(self.probes)) < 2:
@@ -146,8 +151,16 @@ class Settings:
             raise ValueError("health_rise and health_fall must be between 1 and 10")
 
     def blockers(self):
-        return (["backup_gateway is not configured"] if not self.backup else []) + (
-            [] if self.ipv6_disabled else ["LAN IPv6 must be disabled and acknowledged before IPv4 takeover"])
+        blockers = ["backup_gateway is not configured"] if not self.backup else []
+        if self.ipv6_policy == "require_disabled" and not self.ipv6_disabled:
+            blockers.append("LAN IPv6 must be disabled and acknowledged before IPv4 takeover")
+        if self.ipv6_policy == "best_effort" and not self.accept_ipv6_limitations:
+            blockers.append("Best-effort IPv4 takeover requires explicit acceptance of IPv6 limitations")
+        return blockers
+
+    def limitations(self):
+        return (["IPv6 routing and IPv6 DNS are not taken over; application IPv4 fallback is not guaranteed"]
+                if self.ipv6_policy == "best_effort" else [])
 
 
 class Freebox(FreeboxClient):
@@ -207,16 +220,18 @@ class Decision:
         return active
 
 
-def announce(settings, mac):
-    packet = Ether(src=get_if_hwaddr(settings.interface), dst="ff:ff:ff:ff:ff:ff") / ARP(
+def announce(settings, mac, client=None):
+    destination_mac = client[0] if client else "ff:ff:ff:ff:ff:ff"
+    packet = Ether(src=get_if_hwaddr(settings.interface), dst=destination_mac) / ARP(
         op=2, psrc=settings.primary, pdst=settings.primary,
-        hwsrc=mac, hwdst="ff:ff:ff:ff:ff:ff")
+        hwsrc=mac, hwdst=destination_mac)
     sendp(packet, iface=settings.interface, count=3, inter=0.1, verbose=False)
 
 
 class Network:
-    def __init__(self, settings):
+    def __init__(self, settings, client=None):
         self.settings = settings
+        self.client = client
         self.state_file = RUNTIME / "network.json"
         self.snapshot = None
         self.active = False
@@ -248,6 +263,8 @@ class Network:
         self.snapshot = {"sysctls": {}, "active": False,
                          "interface": settings.interface, "primary": settings.primary,
                          "mac": settings.mac}
+        if self.client:
+            self.snapshot["client"] = list(self.client)
         self.save()
         command("ip", "-4", "route", "add", str(settings.network), "dev", settings.interface, "table", TABLE)
         command("ip", "-4", "route", "add", "default", "via", settings.backup,
@@ -280,6 +297,7 @@ class Network:
 
     def activate(self):
         settings = self.settings
+        source_match = f"ip saddr {self.client[1]}" if self.client else f"ip saddr {settings.network}"
         for name, value in {
             f"net/ipv4/conf/{settings.interface}/forwarding": "1",
             "net/ipv4/conf/all/send_redirects": "0",
@@ -293,8 +311,8 @@ class Network:
             path.write_text(value)
         rules = f'''table ip {NFT_TABLE} {{
  chain route_mark {{ type filter hook prerouting priority mangle; policy accept;
-  iifname "{settings.interface}" ip saddr {settings.network} ip daddr != {settings.network} meta mark set {MARK}
-  iifname "{settings.interface}" ip saddr {settings.network} ip daddr {settings.primary} meta l4proto {{ tcp, udp }} th dport 53 meta mark set {MARK}
+  iifname "{settings.interface}" {source_match} ip daddr != {settings.network} meta mark set {MARK}
+  iifname "{settings.interface}" {source_match} ip daddr {settings.primary} meta l4proto {{ tcp, udp }} th dport 53 meta mark set {MARK}
  }}
  chain dns_redirect {{ type nat hook prerouting priority dstnat; policy accept;
   meta mark {MARK} ip daddr {settings.primary} meta l4proto {{ tcp, udp }} th dport 53 dnat to {settings.dns}
@@ -319,7 +337,7 @@ class Network:
             errors.append(f"Firewall restoration failed: {error}")
         if self.snapshot and self.snapshot["active"]:
             try:
-                announce(self.settings, self.settings.mac)
+                announce(self.settings, self.settings.mac, self.client)
             except Exception as error:
                 errors.append(f"Gateway restoration announcement failed: {error}")
         if self.snapshot:
@@ -340,6 +358,8 @@ class Network:
             if any(self.snapshot[key] != getattr(self.settings, key)
                    for key in ("interface", "primary", "mac")):
                 raise ValueError("Recover using the configuration that created network.json")
+            if self.snapshot.get("client"):
+                self.client = tuple(self.snapshot["client"])
         if self.snapshot:
             try:
                 self.deactivate()
@@ -351,7 +371,7 @@ class Network:
             self.snapshot = None
 
 
-def run(settings, monitor_only=False, check_backup=False):
+def run(settings, monitor_only=False, check_backup=False, client_canary=None):
     stop = threading.Event()
     for signum in (signal.SIGTERM, signal.SIGINT):
         signal.signal(signum, lambda *_: stop.set())
@@ -360,10 +380,17 @@ def run(settings, monitor_only=False, check_backup=False):
         raise ValueError("; ".join(settings.blockers()))
     if check_backup and not settings.backup:
         raise ValueError("backup_gateway is not configured")
+    if client_canary:
+        client_mac, client_address = client_canary
+        if (not re.fullmatch(r"(?:[0-9a-f]{2}:){5}[0-9a-f]{2}", client_mac)
+                or int(client_mac[:2], 16) & 1
+                or ipaddress.ip_address(client_address) not in settings.network
+                or client_address in (settings.primary, settings.backup)):
+            raise ValueError("Canary must identify one unicast MAC and ordinary LAN client IPv4 address")
     RUNTIME.mkdir(mode=0o700, parents=True, exist_ok=True)
     with (RUNTIME / "lock").open("w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        network = Network(settings)
+        network = Network(settings, client_canary)
         network.cleanup()
         sniffer = None
         api = None
@@ -382,7 +409,9 @@ def run(settings, monitor_only=False, check_backup=False):
             def handle(packet):
                 if (network.active and ARP in packet and packet[ARP].op == 1
                         and packet[ARP].pdst == settings.primary and packet[ARP].hwsrc != mac
-                        and packet[ARP].psrc not in (settings.primary, settings.backup)):
+                        and packet[ARP].psrc not in (settings.primary, settings.backup)
+                        and (not network.client or (packet[ARP].hwsrc.lower() == network.client[0]
+                                                   and packet[ARP].psrc == network.client[1]))):
                     sendp(Ether(src=mac, dst=packet[ARP].hwsrc) / ARP(
                         op=2, psrc=settings.primary, hwsrc=mac,
                         pdst=packet[ARP].psrc, hwdst=packet[ARP].hwsrc),
@@ -396,6 +425,9 @@ def run(settings, monitor_only=False, check_backup=False):
                 if not ready.wait(5):
                     raise RuntimeError("ARP responder could not start")
             LOG.info("Started in %s mode", "ARMED IPv4 Ethernet" if armed else "MONITOR-ONLY (no takeover)")
+            if armed:
+                for limitation in settings.limitations():
+                    LOG.warning("Accepted best-effort limitation: %s", limitation)
             started = time.monotonic()
             first_report = True
             last_state = None
@@ -436,7 +468,7 @@ def run(settings, monitor_only=False, check_backup=False):
                     network.deactivate()
                     LOG.warning("Returned gateway ownership to Freebox: %s", decision.reason)
                 if network.active and now - last_announcement >= settings.garp:
-                    announce(settings, mac)
+                    announce(settings, mac, network.client)
                     last_announcement = now
                 status = {"version": VERSION, "pid": os.getpid(),
                           "mode": "armed" if armed else "monitor-only", "wan": state,
@@ -447,6 +479,8 @@ def run(settings, monitor_only=False, check_backup=False):
                           "uptime_seconds": round(now - started, 1),
                           "interval_seconds": settings.period, "updated_monotonic": time.monotonic(),
                           "blockers": settings.blockers(), "updated": time.time()}
+                status["ipv6_policy"] = settings.ipv6_policy
+                status["limitations"] = settings.limitations()
                 temporary = RUNTIME / "status.tmp"
                 temporary.write_text(json.dumps(status) + "\n")
                 temporary.replace(RUNTIME / "status.json")

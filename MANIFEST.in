@@ -21,6 +21,16 @@ include tools/windows_ra_acceptance.py
 include tools/capture_probe_ra.py
 include tools/rollout_preflight.py
 include tools/openwrt_ap_audit.py
+include tools/android_ipv4_fallback.py
+include tools/android_lte_pilot.py
+include tools/android_automatic_pilot.py
+include tools/production_path_lab.py
+include tools/lte_load_acceptance.py
+include tools/production_client_canary.py
+include tools/production_client_canary_worker.py
+include tools/household_rollback.py
+include tools/household_lan_canary_worker.py
+include tools/household_lan_canary_rollback.py
 include tools/gateway_benchmark.py
 include tools/windows_gateway_benchmark.py
 include tools/windows_application_fallback.py

@@ -386,7 +386,7 @@ def run_pilot(arguments):
         return result
 
     baseline = snapshot()
-    with tempfile.TemporaryDirectory(prefix=prefix + "-") as directory:
+    with tempfile.TemporaryDirectory(prefix=prefix + "-", dir="/run") as directory:
         state_file = Path(directory, "state.json")
         host_addresses = [entry["local"] for interface in json.loads(command("ip", "-j", "addr"))
                           for entry in interface["addr_info"]]
@@ -824,8 +824,10 @@ def run_pilot(arguments):
                 resolver.rmdir()
             if not resolver_parent_existed and resolver.parent.exists():
                 resolver.parent.rmdir()
-    if snapshot() != baseline:
-        raise RuntimeError("Host network state differs from baseline; inspect before proceeding")
+            if snapshot() != baseline:
+                raise RuntimeError("Host network state differs from baseline; inspect before proceeding")
+            print("pilot removed; host routes, rules, firewall and forwarding match baseline",
+                  file=sys.stderr, flush=True)
     passed.append("pilot removed; host routes, rules, firewall and forwarding match baseline")
     print(json.dumps({"passed": passed, "seconds": round(time.monotonic() - started, 1),
                       "production_ready": False, "ipv6_design": "temporary ULA plus NAT66 on fibre only",

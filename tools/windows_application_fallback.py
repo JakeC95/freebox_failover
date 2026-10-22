@@ -22,6 +22,13 @@ def main():
     for name in ("host", "user", "known-hosts", "vm-host", "vm-key", "vm-known-hosts", "uplink-address", "report"):
         parser.add_argument("--" + name, required=True)
     arguments = parser.parse_args()
+    try:
+        uplink = ipaddress.IPv4Interface(arguments.uplink_address)
+        if "/" not in arguments.uplink_address or uplink.network.prefixlen > 30 or uplink.ip in (uplink.network.network_address,
+                                                               uplink.network.broadcast_address):
+            raise ValueError("Use an ordinary host address with its subnet prefix")
+    except ValueError as error:
+        parser.error("Invalid --uplink-address: " + str(error))
     destination = Path(arguments.report)
     if destination.exists() or not destination.parent.is_dir() or not private_directory(destination.parent):
         parser.error("Use a NEW private report file")

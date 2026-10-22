@@ -18,6 +18,7 @@ Environment=PYTHONDONTWRITEBYTECODE=1
 Restart=on-failure
 RestartSec=10
 TimeoutStopSec=40
+KillMode=mixed
 TimeoutStartSec=90
 WatchdogSec=90
 WatchdogSignal=SIGTERM

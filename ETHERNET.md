@@ -52,7 +52,15 @@ addresses, even when DNS uses the backup router.
 
 This mode does **not** provide IPv6 failover, NAT66, delegated prefixes or RA
 impersonation. Existing Freebox IPv6 routes can blackhole applications when fibre
-fails. A predictable IPv4-only deployment requires a supported way to stop
+fails. The default `ipv6_policy = require_disabled` retains the strict interlock.
+An explicitly accepted practical fallback can instead use
+`ipv6_policy = best_effort` with `accept_ipv6_limitations = true`, leaving
+`lan_ipv6_disabled = false` truthful and preserving normal native fibre IPv6.
+This does not guarantee application fallback or redirect IPv6 DNS. It does not
+enable takeover or authorize household activation. Review
+[qualification and remaining gates](docs/PRODUCTION-QUALIFICATION.md) first.
+
+For the strict default policy, a predictable IPv4-only deployment requires a supported way to stop
 IPv6 Internet routing on the client LAN, followed by expiry/removal of old
 client IPv6 routes and verification of the clients
 before setting `lan_ipv6_disabled = true`. That setting is a human acknowledgement,
@@ -88,7 +96,8 @@ With `enabled = false`, the service only monitors Freebox WAN state. A `--check`
 success means the API works, **not** that backup takeover is ready. Configuration
 blockers are reported in the JSON. No SMS credentials are required.
 
-Once the router is configured, connected, and the IPv6 requirement satisfied:
+Once the router is configured, connected, an IPv6 policy explicitly accepted,
+and a maintenance window approved:
 
 1. Stop `freebox_ethernet`, leave `enabled = false`, configure `backup_gateway`.
 2. Run `sudo python3 /opt/freebox-failover/freebox_ethernet.py --check-backup`.
@@ -156,5 +165,9 @@ VM then exercised the actual kernel routing, nftables and Scapy implementation:
 The lab used separate client, VM, primary and backup network namespaces; it did
 not interrupt the production fibre connection. Its DNS endpoint was a transport
 stub, so these checks establish translation/return routing rather than real DNS
-resolution. No physical 4G router or cellular connection has been tested yet.
-The running VM service is enabled at boot in monitor mode, with takeover disabled.
+resolution. Later physical Android, TV and wired-client tests used the Bouygues
+SIM and OpenWrt MR6400 V5. The installed VM service is now armed with
+best-effort IPv4 takeover; live status confirms fibre up, LTE healthy and no
+takeover active. A physical fibre interruption and full-household LTE cutover
+were not performed. The APs and household DHCP/IPv6 advertisements were left
+unchanged; see [production qualification](docs/PRODUCTION-QUALIFICATION.md).
