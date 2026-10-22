@@ -62,6 +62,40 @@ def command(*arguments, timeout=45, required=True):
     return result.stdout
 
 
+def unicast_packet(state, source, source_mac):
+    from scapy.all import Ether, IPv6, ICMPv6ND_RA, ICMPv6NDOptSrcLLAddr
+    from scapy.all import ICMPv6NDOptPrefixInfo, ICMPv6NDOptRDNSS
+    peer = ipaddress.IPv6Address(state['unicast_ra_peer'])
+    prefix = ipaddress.IPv6Network(state['unicast_ra_prefix'])
+    origin = ipaddress.IPv6Address(source)
+    target_mac = state['physical_mac']
+    if not peer.is_link_local or not origin.is_link_local or peer == origin:
+        raise ValueError('Distinct link-local source and destination addresses are required')
+    if prefix.prefixlen != 64 or prefix.network_address.packed[0] != 253:
+        raise ValueError('Use a dedicated fd00::/8 /64')
+    for mac in (target_mac, source_mac):
+        if not re.fullmatch(r'(?:[0-9a-f]{2}:){5}[0-9a-f]{2}', mac) or int(mac.split(':')[0], 16) & 1 or mac == '00:00:00:00:00:00':
+            raise ValueError('Only explicit nonzero unicast Ethernet addresses are permitted')
+    if source_mac == target_mac:
+        raise ValueError('Probe must not impersonate the client')
+    lifetime, dns_lifetime = state['probe_router_lifetime'], state['probe_dns_lifetime']
+    retire = state.get('probe_retire_prefix', False)
+    preference = state.get('probe_router_preference', 3)
+    if type(lifetime) is not int or type(dns_lifetime) is not int or lifetime not in (0, 15, 30) or dns_lifetime not in (0, 15) or not isinstance(retire, bool) or type(preference) is not int or preference not in (1, 3):
+        raise ValueError('Probe requires bounded lifetimes, explicit high/low preference and boolean retirement')
+    packet = (Ether(src=source_mac, dst=target_mac) /
+              IPv6(src=str(origin), dst=str(peer), hlim=255) /
+              ICMPv6ND_RA(routerlifetime=lifetime, prf=preference) /
+              ICMPv6NDOptSrcLLAddr(lladdr=source_mac) /
+              ICMPv6NDOptPrefixInfo(prefix=str(prefix.network_address), prefixlen=64,
+                                   validlifetime=0 if retire else 120, preferredlifetime=0 if retire else 60) /
+              ICMPv6NDOptRDNSS(lifetime=dns_lifetime, dns=[str(prefix.network_address + 1)]))
+    decoded = Ether(bytes(packet))
+    if decoded.dst != target_mac or decoded[IPv6].dst != str(peer) or decoded[IPv6].hlim != 255:
+        raise RuntimeError('Unicast destination validation failed')
+    return packet
+
+
 def worker(action, state_path):
     namespace = command("ip", "netns", "identify").strip()
     if not namespace.startswith("f4g-pilot-"):
@@ -148,6 +182,18 @@ def worker(action, state_path):
             primary = executor.submit(path_health, "primary", 0x71)
             backup = executor.submit(path_health, "backup", 0x72)
             print(json.dumps({"primary": primary.result(), "backup": backup.result()}))
+    elif action == "unicast-ra":
+        addresses = json.loads(command('ip', '-j', '-6', 'addr', 'show', 'dev', 'wan0'))
+        source = next(address['local'] for interface in addresses for address in interface['addr_info'] if address['scope'] == 'link')
+        packet = unicast_packet(state, source, get_if_hwaddr('wan0'))
+        sendp(packet, iface='wan0', count=2, inter=3.2, verbose=False)
+        state['unicast_sent'] = True
+        temporary = state_file.with_suffix('.new')
+        temporary.write_text(json.dumps(state))
+        temporary.replace(state_file)
+        print(json.dumps({'unicast_packets_sent': 2, 'multicast_packets_sent': 0,
+                          'router_lifetime': state['probe_router_lifetime'],
+                          'dns_lifetime': state['probe_dns_lifetime'], 'sent_monotonic': time.monotonic()}))
     elif action == "isolation-check":
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as connection:
             connection.settimeout(3)
@@ -216,6 +262,8 @@ def worker(action, state_path):
                      ("fd42:4242:71::1", UDP6, TCP6)]
         if state.get("physical_client"):
             listeners.append((state["uplink_ip"], socketserver.ThreadingUDPServer, socketserver.ThreadingTCPServer))
+        if state.get('unicast_ra_peer'):
+            listeners.append((str(ipaddress.IPv6Network(state['unicast_ra_prefix']).network_address + 1), UDP6, TCP6))
         for address, udp_type, tcp_type in listeners:
             for server_type, handler in ((udp_type, UDPHandler), (tcp_type, TCPHandler)):
                 server = server_type((address, 53), handler)
@@ -260,6 +308,12 @@ def run_pilot(arguments):
             raise ValueError("Physical MAC must be six lowercase colon-separated octets")
     elif arguments.physical_client or arguments.physical_mac:
         raise ValueError("Physical clients require bounded external control")
+    if arguments.unicast_ra_peer:
+        if not arguments.external_control or not ipaddress.IPv6Address(arguments.unicast_ra_peer).is_link_local:
+            raise ValueError('Unicast RA requires external control and a link-local peer')
+        prefix = ipaddress.IPv6Network(arguments.unicast_ra_prefix)
+        if prefix.prefixlen != 64 or prefix.network_address.packed[0] != 253:
+            raise ValueError('Use a dedicated fd00::/8 /64 for unicast probing')
     script = str(Path(__file__).resolve())
     prefix = f"f4g-pilot-{os.getpid()}"
     gateway, client = prefix + "-gw", prefix + "-client"
@@ -295,6 +349,10 @@ def run_pilot(arguments):
                  "uplink_ip": str(uplink.ip)}
         if arguments.physical_client:
             state["physical_client"] = arguments.physical_client
+            state['physical_mac'] = arguments.physical_mac
+        if arguments.unicast_ra_peer:
+            state.update(unicast_ra_peer=arguments.unicast_ra_peer,
+                         unicast_ra_prefix=arguments.unicast_ra_prefix)
         state_file.write_text(json.dumps(state))
         decision = PilotDecision(time.monotonic())
         faults = set()
@@ -387,6 +445,17 @@ def run_pilot(arguments):
         def check_dns():
             inside(client, "python3", script, "--worker", "dns-check", "--state", str(state_file), timeout=40)
 
+        def unicast_ra(router_lifetime, dns_lifetime, retire=False, preference=3):
+            if not arguments.unicast_ra_peer or router_lifetime not in (0, 15, 30) or dns_lifetime not in (0, 15):
+                raise ValueError('Unicast probe not enabled or invalid lifetime')
+            current = json.loads(state_file.read_text())
+            current.update(probe_router_lifetime=router_lifetime, probe_dns_lifetime=dns_lifetime,
+                           probe_retire_prefix=retire, probe_router_preference=preference)
+            temporary = state_file.with_suffix('.new')
+            temporary.write_text(json.dumps(current))
+            temporary.replace(state_file)
+            return json.loads(inside(gateway, 'python3', script, '--worker', 'unicast-ra', '--state', str(state_file)))
+
         def serve_external():
             control = Path(arguments.external_control).resolve()
             if control.parent != Path('/run') or not control.name.startswith('failsafe4g-physical-'):
@@ -395,7 +464,9 @@ def run_pilot(arguments):
             addresses = json.loads(inside(gateway, "ip", "-j", "-6", "addr", "show", "dev", "wan0"))
             link_local = next(address["local"] for interface in addresses for address in interface["addr_info"]
                               if address["scope"] == "link")
+            gateway_mac = json.loads(inside(gateway, 'ip', '-j', 'link', 'show', 'dev', 'wan0'))[0]['address']
             last_id = 0
+            last_ra = None
             deadline = time.monotonic() + 300
             while time.monotonic() < deadline:
                 request_path = control / 'command.json'
@@ -404,6 +475,8 @@ def run_pilot(arguments):
                     if request['id'] > last_id:
                         if request['action'] == 'fault' and request['path'] in ('primary', 'backup') and isinstance(request['enabled'], bool):
                             inject_fault(request['path'], request['enabled'])
+                        elif request['action'] == 'unicast_ra':
+                            last_ra = unicast_ra(request['router_lifetime'], request['dns_lifetime'], request.get('retire_prefix', False), request.get('preference', 3))
                         elif request['action'] == 'stop':
                             passed.append('externally controlled physical-client pilot stopped for cleanup')
                             return
@@ -414,7 +487,8 @@ def run_pilot(arguments):
                 status = {'ready': True, 'phase': decision.phase, 'reason': decision.reason,
                           'health': health, 'faults': sorted(faults), 'acknowledged_id': last_id,
                           'ipv6_gateway': link_local, 'gateway': str(uplink.ip),
-                          'namespace': gateway, 'transitions': transitions}
+                          'namespace': gateway, 'transitions': transitions, 'unicast_ra': last_ra,
+                          'gateway_mac': gateway_mac}
                 temporary = control / 'status.new'
                 temporary.write_text(json.dumps(status))
                 temporary.replace(control / 'status.json')
@@ -437,6 +511,9 @@ def run_pilot(arguments):
             inside(gateway, "ip", "link", "set", "wan0", "up")
             inside(gateway, "python3", script, "--worker", "address-check", "--state", str(state_file))
             inside(gateway, "ip", "addr", "add", str(uplink), "dev", "wan0")
+            if arguments.unicast_ra_peer:
+                prefix = ipaddress.IPv6Network(arguments.unicast_ra_prefix)
+                inside(gateway, 'ip', '-6', 'addr', 'add', str(prefix.network_address + 1) + '/64', 'dev', 'wan0')
             inside(gateway, "ip", "route", "add", "default", "via", arguments.primary)
             if arguments.automatic:
                 for mark, table, upstream in (("0x71", "7171", arguments.primary), ("0x72", "7172", arguments.backup)):
@@ -484,6 +561,10 @@ def run_pilot(arguments):
                     inside(gateway, "nft", "add", "rule", "inet", "pilot", "input",
                            "iifname", "wan0", "ip", "saddr", arguments.physical_client,
                            protocol, "dport", "53", "counter", "accept")
+                if arguments.unicast_ra_peer:
+                    inside(gateway, 'nft', 'add', 'rule', 'inet', 'pilot', 'input',
+                           'iifname', 'wan0', 'ether', 'saddr', arguments.physical_mac,
+                           'meta', 'nfproto', 'ipv6', protocol, 'dport', '53', 'counter', 'accept')
             inside(gateway, "nft", "add", "chain", "inet", "pilot", "forward",
                    '{ type filter hook forward priority filter; policy drop; }')
             inside(gateway, "nft", "add", "rule", "inet", "pilot", "forward",
@@ -624,6 +705,11 @@ def run_pilot(arguments):
                     if process.poll() is not None:
                         raise RuntimeError("Pilot worker exited early")
         finally:
+            if arguments.unicast_ra_peer and json.loads(state_file.read_text()).get('unicast_sent'):
+                try:
+                    unicast_ra(0, 0, True)
+                except Exception as error:
+                    print('Unicast RA retirement failed: ' + str(error), file=sys.stderr)
             for process in processes:
                 if process.poll() is None:
                     process.terminate()
@@ -648,7 +734,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument("--run", action="store_true")
-    action.add_argument("--worker", choices=("address-check", "solicit", "advertise", "dns", "dns-check", "isolation-check", "health"), help=argparse.SUPPRESS)
+    action.add_argument("--worker", choices=("address-check", "solicit", "advertise", "dns", "dns-check", "isolation-check", "health", "unicast-ra"), help=argparse.SUPPRESS)
     parser.add_argument("--state", help=argparse.SUPPRESS)
     parser.add_argument("--interface", default="enp0s5")
     parser.add_argument("--primary", default="192.168.1.254")
@@ -658,6 +744,8 @@ if __name__ == "__main__":
     parser.add_argument("--external-control", help="Private /run control directory for a bounded physical-client test")
     parser.add_argument("--physical-client", help="Explicit single-client IPv4 address; requires external control")
     parser.add_argument("--physical-mac", help="Explicit single-client Ethernet MAC; requires external control")
+    parser.add_argument('--unicast-ra-peer', help='Explicit single-client link-local IPv6 address for bounded unicast probes')
+    parser.add_argument('--unicast-ra-prefix', default='fd42:4242:72::/64', help='Dedicated ULA /64 for the optional unicast probe')
     settings = parser.parse_args()
     if settings.run:
         if not settings.uplink_address:

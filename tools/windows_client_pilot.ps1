@@ -1,12 +1,13 @@
 param(
     [Parameter(Mandatory=$true)]
-    [ValidateSet('Snapshot','Arm','TestRollback','Apply','Restore','Verify','Disarm')]
+    [ValidateSet('Snapshot','Arm','TestRollback','Apply','PrepareRA','ReadRA','Restore','Verify','Disarm')]
     [string]$Action,
     [Parameter(Mandatory=$true)]
     [string]$RunDirectory,
     [string]$ClientAddress,
     [string]$Gateway,
-    [string]$IPv6Gateway
+    [string]$IPv6Gateway,
+    [string]$ProbePrefix
 )
 
 $ErrorActionPreference = 'Stop'
@@ -39,6 +40,16 @@ function Read-Baseline {
 
 function Read-State {
     Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+}
+
+function Test-ProbeAddress($Address, $Prefix) {
+    $candidate = [Net.IPAddress]::Parse(($Address -split '%')[0]).GetAddressBytes()
+    $network = [Net.IPAddress]::Parse(($Prefix -split '/')[0]).GetAddressBytes()
+    if ($candidate.Count -ne 16 -or $network.Count -ne 16) { return $false }
+    for ($index=0; $index -lt 8; $index++) {
+        if ($candidate[$index] -ne $network[$index]) { return $false }
+    }
+    return $true
 }
 
 function Get-Configuration($InterfaceIndex) {
@@ -97,6 +108,15 @@ function Restore-OwnedChanges {
             Remove-NetRoute -Confirm:$false
     }
     Get-DnsClientNrptRule | Where-Object Comment -eq $taskName | Remove-DnsClientNrptRule -Force
+    if ($state.RAProbe) {
+        Get-NetRoute -InterfaceIndex $baseline.Configuration.InterfaceIndex -DestinationPrefix '::/0' -PolicyStore ActiveStore -ErrorAction SilentlyContinue |
+            Where-Object NextHop -eq $state.RAProbe.Gateway | Remove-NetRoute -Confirm:$false
+        Get-NetIPAddress -InterfaceIndex $baseline.Configuration.InterfaceIndex -AddressFamily IPv6 |
+            Where-Object { Test-ProbeAddress $_.IPAddress $state.RAProbe.Prefix } | Remove-NetIPAddress -Confirm:$false
+        Get-NetRoute -InterfaceIndex $baseline.Configuration.InterfaceIndex -DestinationPrefix $state.RAProbe.Prefix -PolicyStore ActiveStore -ErrorAction SilentlyContinue |
+            Where-Object NextHop -eq '::' | Remove-NetRoute -Confirm:$false
+        Start-Sleep -Seconds 18
+    }
     $verification = Test-Configuration
     Write-PrivateJson $receiptPath $verification
     if (-not $verification.Matched) { throw 'Restoration verification failed; backups retained for inspection.' }
@@ -194,6 +214,43 @@ if ($Action -eq 'Apply') {
         Restore-OwnedChanges | Out-Null
         throw
     }
+    exit
+}
+
+if ($Action -eq 'PrepareRA') {
+    $baseline = Read-Baseline
+    $state = Read-State
+    if ($state.Applied) { throw 'Restore the previous test before preparing an RA probe.' }
+    if (-not (Test-Configuration).Matched) { throw 'Baseline must match before preparing an RA probe.' }
+    $network = [Net.IPAddress]::Parse(($ProbePrefix -split '/')[0])
+    if ($network.AddressFamily -ne 'InterNetworkV6' -or ($ProbePrefix -split '/')[1] -ne '64' -or $network.GetAddressBytes()[0] -ne 253) { throw 'Use a dedicated fd00::/8 test /64.' }
+    if (-not ([Net.IPAddress]::Parse($IPv6Gateway)).IsIPv6LinkLocal) { throw 'RA gateway must be link-local.' }
+    if (Get-NetIPAddress -AddressFamily IPv6 | Where-Object { Test-ProbeAddress $_.IPAddress $ProbePrefix }) { throw 'Test prefix is already assigned.' }
+    if (Get-NetRoute -DestinationPrefix $ProbePrefix -ErrorAction SilentlyContinue) { throw 'Test prefix route already exists.' }
+    if (Get-NetRoute -DestinationPrefix '::/0' | Where-Object NextHop -eq $IPv6Gateway) { throw 'RA gateway is already a default router.' }
+    $task = Get-ScheduledTaskInfo -TaskName $taskName
+    if ($task.NextRunTime -lt (Get-Date).AddMinutes(5)) { throw 'Rearm the rollback task before probing.' }
+    $state | Add-Member -NotePropertyName RAProbe -NotePropertyValue ([ordered]@{Prefix=$ProbePrefix; Gateway=$IPv6Gateway}) -Force
+    $state.Applied = $true
+    Write-PrivateJson $statePath $state
+    [ordered]@{ Prepared=$true; NetworkSettingsChanged=$false } | ConvertTo-Json -Compress
+    exit
+}
+
+if ($Action -eq 'ReadRA') {
+    $baseline = Read-Baseline
+    $state = Read-State
+    if (-not $state.RAProbe) { throw 'RA probe has not been prepared.' }
+    [ordered]@{
+        Addresses = @(Get-NetIPAddress -InterfaceIndex $baseline.Configuration.InterfaceIndex -AddressFamily IPv6 |
+            Where-Object { Test-ProbeAddress $_.IPAddress $state.RAProbe.Prefix } | Select-Object IPAddress,PrefixOrigin,AddressState)
+        Router = @(Get-NetRoute -InterfaceIndex $baseline.Configuration.InterfaceIndex -DestinationPrefix '::/0' -ErrorAction SilentlyContinue |
+            Where-Object NextHop -eq $state.RAProbe.Gateway | Select-Object NextHop,RouteMetric,Protocol)
+        AllDefaultRouters = @(Get-NetRoute -InterfaceIndex $baseline.Configuration.InterfaceIndex -DestinationPrefix '::/0' -ErrorAction SilentlyContinue |
+            Select-Object NextHop,RouteMetric,Protocol)
+        DNS = @(Get-DnsClientServerAddress -InterfaceIndex $baseline.Configuration.InterfaceIndex -AddressFamily IPv6).ServerAddresses
+        ObservedUtc = [DateTime]::UtcNow.ToString('o')
+    } | ConvertTo-Json -Depth 6 -Compress
     exit
 }
 

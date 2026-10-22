@@ -104,6 +104,11 @@ fibre-link outage behaviour or automatic household readiness. SSH configuration
 provided before the test is left unchanged; the test does not disable UAC,
 change SSH keys/firewall rules or reset the Ethernet adapter.
 
+The subsequent [single-client router-discovery test](WINDOWS-ROUTER-DISCOVERY.md)
+now also verifies actual Windows SLAAC, RDNSS and default-router lifetimes using
+strictly targeted unicast advertisements and a proved local rollback. It does
+not imply that a household-wide overlapping-RA design has been approved.
+
 References: [Microsoft New-NetRoute](https://learn.microsoft.com/en-us/powershell/module/nettcpip/new-netroute),
 [Microsoft NRPT rules](https://learn.microsoft.com/en-us/powershell/module/dnsclient/add-dnsclientnrptrule),
 [Paramiko host-key policy](https://docs.paramiko.org/en/stable/api/client.html).

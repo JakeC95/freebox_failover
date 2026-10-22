@@ -148,8 +148,11 @@ routes, rules, firewall and forwarding matching the original snapshot. Route
 changes are applied before publishing the new DNS/RA phase, and an exited pilot
 worker aborts automatic monitoring rather than continuing with missing services.
 This is still an opt-in pilot, not an installed
-automatic household gateway. IPv6-only upstream failure detection, actual client
+automatic household gateway. IPv6-only upstream failure detection, other client
 OS RA behaviour and physical-link outages remain open. A subsequent
 [real Windows client data-path acceptance](WINDOWS-ACCEPTANCE.md) passes using
 temporary routes, restricted test-domain DNS and a proved local rollback guard;
 it does not claim Windows RA/RDNSS acceptance on an isolated physical LAN.
+The later [targeted Windows router-discovery probe](WINDOWS-ROUTER-DISCOVERY.md)
+also passes actual SLAAC, RDNSS and router lifetime processing using client-only
+unicasts and wire capture, still without approving household-wide RA deployment.

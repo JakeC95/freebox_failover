@@ -170,4 +170,8 @@ and recovery hysteresis. It has passed live without changing household routing;
 production takeover remains disabled pending topology acceptance. Subsequent
 [real Windows client acceptance](WINDOWS-ACCEPTANCE.md) verifies actual routed
 traffic/fallback and exact settings restoration, without changing household RAs
-or claiming a Windows isolated-LAN RA test.
+or claiming a Windows isolated-LAN RA test. A further
+[targeted Windows router-discovery probe](WINDOWS-ROUTER-DISCOVERY.md) now passes
+real SLAAC, RDNSS, default installation/withdrawal and expiry, with wire evidence
+that only the selected client received the probe RAs. Final household topology,
+other clients and production behaviour remain gated separately.
