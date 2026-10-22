@@ -26,6 +26,9 @@ The systemd watchdog expects progress from the **main loop** every 90 seconds.
 A stalled process is terminated, its cleanup command runs, and systemd restarts
 it. Normal logs record transitions and error changes instead of every poll.
 Logs are volatile on this VM and disappear after a reboot.
+Automatic restarts retry every 30 seconds without a start-count lockout, so a
+temporary startup failure cannot permanently disable monitoring. Repeated
+failures remain visible in the journal and `NRestarts` service property.
 
 ## Timing and stability
 
@@ -37,9 +40,29 @@ times `probe_timeout`, so observed detection time includes network timeouts.
 
 Explicit WAN outage must persist for `down = 10` seconds before takeover; recovery
 must persist for `up = 20` seconds. An unknown API state never initiates takeover.
-If already active, a healthy backup can continue during `unknown_grace = 15`
-seconds of API uncertainty, then ownership returns to the Freebox. Confirmed
-backup failure releases takeover immediately. These decisions use monotonic time.
+With the default `unknown_policy = release`, an active healthy backup continues
+for `unknown_grace = 15` seconds of API uncertainty, then ownership returns to
+the Freebox. The household deployment now explicitly selects
+`unknown_policy = hold_backup`: an already active, healthy backup remains in use
+until the Freebox confirms recovery for the full `up` interval. This avoids
+abandoning working LTE solely because the management API is unavailable, but
+can extend cellular data use if the API stays unavailable after fibre recovers.
+Status reports `api_unknown_holding_backup` and the journal warns when this
+condition starts. Neither policy initiates takeover from API uncertainty alone.
+Confirmed backup failure releases takeover immediately under both policies.
+These decisions use monotonic time.
+
+For an unattended period, check the SIM's remaining data/validity with the
+operator. No external failure notification is configured; the service's status
+and journal are the local diagnostics. To disable takeover and restore the
+Freebox path from the VM, use:
+
+```sh
+sudo python3 /opt/freebox-failover/tools/household_rollback.py
+```
+
+That command leaves monitoring running with takeover disabled until explicitly
+re-enabled. It requires the VM and its host to remain reachable.
 
 `--check-backup` is a one-shot route/probe diagnostic, not the consecutive-sample
 readiness decision. Stop the monitoring service before running it so it can

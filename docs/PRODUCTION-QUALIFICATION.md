@@ -133,6 +133,30 @@ simulate a VM/Freebox/USB-host failure while actively forwarding LTE traffic.
 The updated candidate preflight also rejects leftover production-canary run
 directories or transient timer units, in addition to stale lab namespaces.
 
+## Unattended operation improvements
+
+Before the unattended observation period, the controller gained an explicit
+`unknown_policy=hold_backup` option, now selected in the household configuration.
+If the Freebox API disappears while healthy LTE is already carrying traffic,
+the controller keeps LTE until confirmed primary recovery or backup failure.
+The compatibility default remains `release`. Cellular use can therefore continue
+after fibre recovers if API access has not recovered; the status reason and a
+transition warning make that condition visible.
+
+The disconnected production laboratory passed ten checks under each policy,
+including uncertainty while on primary, uncertainty beyond the grace interval
+while on LTE, loss of LTE while the API is unknown, confirmed primary recovery,
+and cleanup after process death. The service now retries failed starts every
+30 seconds without a start-count lockout. A separate harmless systemd test
+using an accelerated retry interval recovered on attempt seven after six
+deliberate failures. These tests did not interrupt household routing.
+
+Deployment used verified backups and a temporary automatic restore timer.
+The running service reports the new policy, fibre up, healthy LTE standby, and
+no unexpected restarts; the wired client retained its original Freebox gateway
+MAC and fibre egress. The timer was disarmed after these checks. The ordinary
+10-second outage and 20-second recovery thresholds are unchanged.
+
 ## Remaining boundaries
 
 - Selected Android, TV, and Windows tests are not a guarantee for every
@@ -146,3 +170,7 @@ directories or transient timer units, in addition to stale lab namespaces.
   with fibre connected and used a synthetic primary-down signal; only one wired
   client was directly observed, so wireless/AP and other client behavior remain
   unqualified. A real ISP outage remains untested.
+- Primary outage detection still follows Freebox API connection state. An ISP
+  routing problem that leaves that state at `up` does not trigger takeover.
+- The VM's pre-existing machine-ID commit service timed out again on a bounded
+  retry. This OS issue remains unresolved; no VM reboot was performed.

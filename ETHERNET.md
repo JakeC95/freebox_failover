@@ -168,6 +168,7 @@ stub, so these checks establish translation/return routing rather than real DNS
 resolution. Later physical Android, TV and wired-client tests used the Bouygues
 SIM and OpenWrt MR6400 V5. The installed VM service is now armed with
 best-effort IPv4 takeover; live status confirms fibre up, LTE healthy and no
-takeover active. A physical fibre interruption and full-household LTE cutover
-were not performed. The APs and household DHCP/IPv6 advertisements were left
+takeover active. A global IPv4 takeover with a synthetic WAN-down signal passed
+from one wired client; a physical fibre interruption remains untested. The APs
+and household DHCP/IPv6 advertisements were left
 unchanged; see [production qualification](docs/PRODUCTION-QUALIFICATION.md).

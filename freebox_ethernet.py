@@ -137,6 +137,9 @@ class Settings:
         self.up = config.getfloat("failover", "up", fallback=20)
         self.garp = config.getfloat("failover", "garp", fallback=3)
         self.unknown_grace = config.getfloat("failover", "unknown_grace", fallback=15)
+        self.unknown_policy = config.get("failover", "unknown_policy", fallback="release").strip()
+        if self.unknown_policy not in ("release", "hold_backup"):
+            raise ValueError("unknown_policy must be release or hold_backup")
         self.backup_check = config.getfloat("ethernet", "standby_check", fallback=15)
         self.probe_timeout = config.getfloat("ethernet", "probe_timeout", fallback=1)
         self.backup_rise = config.getint("ethernet", "health_rise", fallback=2)
@@ -206,6 +209,9 @@ class Decision:
             self.reason = "backup_unavailable"
             return False
         if category == "unknown":
+            if active and healthy and self.settings.unknown_policy == "hold_backup":
+                self.reason = "api_unknown_holding_backup"
+                return True
             holding = active and healthy and now - self.since < self.settings.unknown_grace
             self.reason = "api_unknown_grace" if holding else "api_unknown"
             return holding
@@ -432,6 +438,7 @@ def run(settings, monitor_only=False, check_backup=False, client_canary=None):
             first_report = True
             last_state = None
             last_error = None
+            last_reason = None
             last_announcement = 0
             next_probe = 0
             while not stop.is_set():
@@ -461,6 +468,10 @@ def run(settings, monitor_only=False, check_backup=False, client_canary=None):
                     raise RuntimeError("ARP responder stopped")
                 now = time.monotonic()
                 desired = decision.update(state, healthy, network.active, now) if armed else False
+                if decision.reason != last_reason:
+                    if decision.reason == "api_unknown_holding_backup":
+                        LOG.warning("Freebox API unavailable; retaining healthy LTE until confirmed primary recovery; cellular data use continues")
+                    last_reason = decision.reason
                 if desired and not network.active:
                     network.activate()
                     LOG.warning("Backup takeover activated: %s", decision.reason)
@@ -480,6 +491,7 @@ def run(settings, monitor_only=False, check_backup=False, client_canary=None):
                           "interval_seconds": settings.period, "updated_monotonic": time.monotonic(),
                           "blockers": settings.blockers(), "updated": time.time()}
                 status["ipv6_policy"] = settings.ipv6_policy
+                status["unknown_policy"] = settings.unknown_policy
                 status["limitations"] = settings.limitations()
                 temporary = RUNTIME / "status.tmp"
                 temporary.write_text(json.dumps(status) + "\n")

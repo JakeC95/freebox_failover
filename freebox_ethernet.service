@@ -2,8 +2,7 @@
 Description=Freebox Ethernet backup (monitor-only until explicitly enabled)
 Wants=network-online.target
 After=network-online.target
-StartLimitIntervalSec=120
-StartLimitBurst=5
+StartLimitIntervalSec=0
 
 [Service]
 Type=notify
@@ -16,7 +15,7 @@ ExecStart=/usr/bin/python3 -u ${FAILOVER_SCRIPT} -c ${CONFIG_FILE}
 ExecStopPost=/usr/bin/python3 ${FAILOVER_SCRIPT} -c ${CONFIG_FILE} --cleanup
 Environment=PYTHONDONTWRITEBYTECODE=1
 Restart=on-failure
-RestartSec=10
+RestartSec=30
 TimeoutStopSec=40
 KillMode=mixed
 TimeoutStartSec=90

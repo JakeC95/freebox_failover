@@ -26,8 +26,9 @@ The existing Ethernet service already implements opt-in IPv4 gateway ARP
 takeover with marked routing to the cellular router, DNS redirection, health
 guards and restoration. Keeping that mechanism failover-only avoids making VM
 throughput or its USB storage a normal fibre-path bottleneck. The installed
-service is armed but currently idle on fibre; the physical fibre-outage and
-whole-household LTE path remain untested.
+service is armed but currently idle on fibre. Global IPv4 takeover with a
+synthetic outage passed from one wired client; a physical fibre outage and
+every household client's behavior remain untested.
 
 This describes the intended separation, **not a fully validated dual-stack
 production design**. Do not disable LAN IPv6 to bypass the interlock.

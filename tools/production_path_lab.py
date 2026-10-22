@@ -220,6 +220,7 @@ down = 1
 up = 1
 garp = 0.5
 unknown_grace = 1
+unknown_policy = {arguments.unknown_policy}
 """
         (directory / "lab.conf").write_text(config)
 
@@ -316,6 +317,11 @@ unknown_grace = 1
             expect(False, True)
             client(False)
             passed.append("production daemon starts without takeover and native DNS/traffic work")
+            state("unknown")
+            time.sleep(2)
+            assert not status()["active"]
+            client(False)
+            passed.append("API uncertainty while on primary never initiates takeover")
             state("down")
             expect(True, True)
             time.sleep(0.4)
@@ -330,11 +336,22 @@ unknown_grace = 1
             state("unknown")
             time.sleep(0.4)
             assert status()["active"]
-            expect(False)
-            client(False)
-            passed.append("unknown API state holds briefly then releases takeover after the configured grace")
+            if arguments.unknown_policy == "hold_backup":
+                time.sleep(2)
+                assert status()["active"] and status()["reason"] == "api_unknown_holding_backup"
+                client(True)
+                state("up")
+                expect(False)
+                client(False)
+                passed.append("API uncertainty beyond grace retains working LTE; confirmed primary recovery restores native traffic")
+            else:
+                expect(False)
+                client(False)
+                passed.append("unknown API state holds briefly then releases takeover after the configured grace")
             state("down")
             expect(True)
+            if arguments.unknown_policy == "hold_backup":
+                state("unknown")
             inside("upstream", "nft", "add", "table", "inet", "lab_fault")
             inside("upstream", "nft", "add", "chain", "inet", "lab_fault", "input",
                    "{ type filter hook input priority -100; policy accept; }")
@@ -344,6 +361,10 @@ unknown_grace = 1
             assert not status()["active"]
             passed.append("both paths unavailable releases takeover and does not oscillate")
             inside("upstream", "nft", "delete", "table", "inet", "lab_fault")
+            if arguments.unknown_policy == "hold_backup":
+                expect(False, True)
+                assert status()["wan"] == "unknown"
+                state("down")
             expect(True, True)
             client(True)
             state("up")
@@ -402,6 +423,7 @@ unknown_grace = 1
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", required=True)
+    parser.add_argument("--unknown-policy", choices=("release", "hold_backup"), default="release")
     parser.add_argument("--directory")
     parser.add_argument("--worker", choices=("daemon", "cleanup", "canary", "servers", "client"))
     parser.add_argument("--client-namespace")
